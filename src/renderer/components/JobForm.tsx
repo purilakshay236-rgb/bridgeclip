@@ -6,7 +6,7 @@ import { useDraftStore, type ClipDraft, type WizardStep } from '../store/use-dra
 import { useActiveJobs } from '../store/use-job-store'
 import type { ClipJobRequest } from '../../shared/jobs'
 import { MAX_PARALLEL_JOBS } from '../../shared/jobs'
-import { CaptionPresetPicker, CAPTION_PRESET_NAMES } from './CaptionPresetPicker'
+import { CaptionColors, CaptionPresetPicker, CAPTION_PRESET_NAMES } from './CaptionPresetPicker'
 import { SourcePicker } from './SourcePicker'
 import { Panel } from './ui/Panel'
 import { Switch } from './ui/Switch'
@@ -32,7 +32,9 @@ const FORMATS = [
 const LAYOUT_STYLES = [
   { id: 'auto', label: 'Smart', hint: 'Auto frames each shot' },
   { id: 'fill', label: 'Full frame', hint: 'Follows the speaker' },
-  { id: 'fit', label: 'Classic', hint: 'Whole frame, blurred' }
+  { id: 'fit', label: 'Classic', hint: 'Whole frame, blurred' },
+  { id: 'split', label: 'Split', hint: 'Top/bottom, set once' },
+  { id: 'debate', label: 'Debate', hint: 'Both on top, speaker below' }
 ] as const
 
 const MAX_CLIPS = 100
@@ -77,6 +79,7 @@ export function buildJobRequest(draft: ClipDraft, trim: { start: number | null; 
     videoSpeed: draft.videoSpeed ?? 1,
     includeCaptions: draft.includeCaptions,
     captionPreset: draft.captionPreset,
+    ...(draft.workflow !== 'review' && Object.keys(draft.captionColors ?? {}).length ? { captionColors: draft.captionColors } : {}),
     includeTitle: draft.includeTitle,
     startTimeSeconds: trim.start,
     endTimeSeconds: trim.end,
@@ -336,8 +339,9 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
 
       {draft.aspectRatio === '9:16' && (
         <Group label="Framing">
-          <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Framing">
-            {LAYOUT_STYLES.map((style) => {
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Framing">
+            {/* Split asks for one adjustment mid-run; Review & edit frames each candidate instead. */}
+            {LAYOUT_STYLES.filter((style) => style.id !== 'split' || draft.workflow !== 'review').map((style) => {
               const selected = draft.layoutStyle === style.id
               return (
                 <button
@@ -362,6 +366,16 @@ export function FormatStep({ draft, update }: { draft: ClipDraft; update: Update
               )
             })}
           </div>
+          {draft.layoutStyle === 'split' && (
+            <p className="mt-2 text-2xs text-ink-subtle">
+              After the clips are found, the run pauses once so you can place the two panels. Every clip uses that framing.
+            </p>
+          )}
+          {draft.layoutStyle === 'debate' && (
+            <p className="mt-2 text-2xs text-ink-subtle">
+              For two people talking: both stay on top, and the bottom follows whoever speaks. Other shots use Smart framing.
+            </p>
+          )}
           {draft.layoutStyle === 'auto' && draft.clippingMode === 'economy' && (
             <p className="mt-2 text-2xs text-ink-subtle">AI vision checks are off in Economy mode.</p>
           )}
@@ -447,7 +461,7 @@ export function ClipsStep({ draft, update }: { draft: ClipDraft; update: Update 
           <p className="mt-2 text-2xs text-ink-subtle">Economy uses lower-cost models and skips paid vision checks. Transcription retries temporary errors and can fall back to Whisper Large V3, then MAI Transcribe 2. Clip choices and captions may be less accurate.</p>}
       </Group>
       <Group label="Clip length" aside={draft.durations.length === 0 ? 'Any length' : `${draft.durations.length} selected`}>
-        <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-7" role="group" aria-label="Clip length options">
+        <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-8" role="group" aria-label="Clip length options">
           {DURATIONS.map((d) => {
             const selected = draft.durations.includes(d.id)
             return (
@@ -534,7 +548,10 @@ export function CaptionsStep({ draft, update }: { draft: ClipDraft; update: Upda
           value={draft.captionPreset}
           onChange={(captionPreset) => update({ captionPreset })}
           disabled={!draft.includeCaptions}
+          colors={draft.captionColors}
         />
+        {draft.workflow !== 'review' && <div className="mt-4"><CaptionColors preset={draft.captionPreset} value={draft.captionColors}
+          onChange={(key, color) => { const captionColors = { ...draft.captionColors, [key]: color }; if (!color) delete captionColors[key]; update({ captionColors }) }} /></div>}
       </div>
     </div>
   )
@@ -652,7 +669,7 @@ function formatSeconds(total: number): string {
 }
 
 /** Tiny 9:16 diagram of a framing style: split panels, full bleed, or letterbox. */
-function FramingGlyph({ style, selected }: { style: 'auto' | 'fill' | 'fit'; selected: boolean }): React.JSX.Element {
+function FramingGlyph({ style, selected }: { style: 'auto' | 'fill' | 'fit' | 'split' | 'debate'; selected: boolean }): React.JSX.Element {
   const fill = selected ? 'bg-accent' : 'bg-ink-subtle/60'
   return (
     <span
@@ -670,6 +687,21 @@ function FramingGlyph({ style, selected }: { style: 'auto' | 'fill' | 'fit'; sel
       )}
       {style === 'fill' && <span className={cn('flex-1 rounded-[1px]', fill)} />}
       {style === 'fit' && <span className={cn('my-auto h-[6px] rounded-[1px]', fill)} />}
+      {style === 'split' && (
+        <>
+          <span className={cn('flex-1 rounded-[1px]', fill)} />
+          <span className={cn('mt-px flex-1 rounded-[1px]', fill)} />
+        </>
+      )}
+      {style === 'debate' && (
+        <>
+          <span className={cn('flex h-[6px] gap-px rounded-[1px]')}>
+            <span className={cn('flex-1 rounded-[1px] opacity-60', fill)} />
+            <span className={cn('flex-1 rounded-[1px] opacity-60', fill)} />
+          </span>
+          <span className={cn('flex-1 rounded-[1px]', fill)} />
+        </>
+      )}
     </span>
   )
 }

@@ -21,6 +21,7 @@ import { useDataVersionStore } from './store/use-data-version-store'
 import { usePostsStore } from './store/use-posts-store'
 import { requestSettingsSection } from './lib/settings-focus'
 import { ChangelogDialog } from './components/Changelog'
+import { SplitFramingDialog } from './components/SplitFramingDialog'
 import { Button } from './components/ui/Button'
 import { getApi } from './lib/ipc'
 
@@ -37,6 +38,8 @@ export default function App(): React.JSX.Element {
   const checkTools = useSettingsStore((s) => s.checkTools)
   const settingsLoaded = useSettingsStore((s) => s.loaded)
   const changelogOpen = useChangelogStore((s) => s.open)
+  // A Split-style run waits here for its one framing answer, whichever page is open.
+  const framingJob = useJobStore((s) => Object.values(s.jobs).find((job) => job.framing))
   const closeChangelog = useCallback(() => useChangelogStore.getState().setOpen(false), [])
 
   // Sidebar destinations always open the page root, even when already active.
@@ -177,6 +180,7 @@ export default function App(): React.JSX.Element {
         </div>
       )}
       {changelogOpen && <ChangelogDialog onClose={closeChangelog} />}
+      {framingJob?.framing && <SplitFramingDialog key={framingJob.id} job={framingJob} />}
     </>
   )
 }

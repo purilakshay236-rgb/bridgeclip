@@ -48,6 +48,7 @@ from clip_engine.services.layout_renderer import (
     AUDIO_FORMAT,
     AUDIO_SYNC,
     CaptionPlacer,
+    DEBATE_TITLE_SCALE,
     banner_y,
     build_layout_graph,
     caption_anchor,
@@ -74,6 +75,11 @@ LANDSCAPE_TITLE_FADE_S = 0.4
 MAX_OUTPUT_FPS = 60
 # Bound raster allocation even when a model ignores the requested title length.
 MAX_TITLE_CHARS = 120
+# Title header faces the editor offers (shared/clip-editor.ts TITLE_FONTS), bundled in assets/fonts.
+TITLE_FONTS = {
+    'montserrat': 'Montserrat-Black.ttf', 'poppins': 'Poppins-Black.ttf', 'anton': 'Anton-Regular.ttf',
+    'archivo': 'ArchivoBlack-Regular.ttf', 'serif': 'InstrumentSerif-Italic.ttf',
+}
 # Landscape H.264 bitrates (Mbps) by output height at 30 fps, after
 # YouTube's upload recommendations; 60 fps sources get 1.5x.
 LANDSCAPE_BITRATE_MBPS = {1080: 12, 1440: 20, 2160: 45}
@@ -96,6 +102,8 @@ class RenderRequest:
     # Word timings drive tight pacing as well as captions, so they are passed
     # even when captions are off.
     transcript_segments: Optional[list[TranscriptSegment]] = None
+    # The whole source's transcript: speaker following learns each voice from the full conversation.
+    source_transcript: Optional[list[TranscriptSegment]] = None
     include_captions: bool = True
     caption_style: Optional[CaptionStyle] = None
     # Hide only our caption layer in these source-time intervals.
@@ -106,6 +114,10 @@ class RenderRequest:
     title_text: Optional[str] = None
     # Off keeps title_text for editorial review but draws no title card.
     include_title: bool = True
+    # Editor overrides: title card center as a fraction of output height, and its size.
+    title_y: Optional[float] = None
+    title_scale: float = 1.0
+    title_font: str = 'montserrat'
     # Planner-chosen punch words highlighted in the captions.
     emphasis_words: list[str] = field(default_factory=list)
 
@@ -128,6 +140,9 @@ class RenderRequest:
     debug_capture: bool = False
     progress_callback: Optional[Callable[[str, Optional[float]], None]] = None
     manual_plan: Optional[ClipLayoutPlan] = None
+    # Split style: two normalized (x, y, w, h) source crops, top then bottom, for the
+    # whole clip. Unlike manual_plan, pacing and skips still apply.
+    split_crops: Optional[list[list[float]]] = None
     # Exact source-time selections from the manual editor; no automatic pacing,
     # sliver removal or protected-interval restoration may change these cuts.
     manual_ranges_ms: Optional[list[tuple[int, int]]] = None
@@ -352,6 +367,9 @@ class RenderingService:
         plan: Optional[ClipLayoutPlan] = None
         if request.manual_plan is not None:
             plan = request.manual_plan
+        elif request.split_crops and not is_landscape:
+            plan = ClipLayoutPlan([ShotLayout(0, window_ms, LayoutType.TWO_SHOT, source="manual",
+                                              manual_crops=request.split_crops)], source_w, source_h)
         elif not is_landscape:
             plan = await self._plan_layout(request, source_w, source_h, window_start_ms, window_ms)
         analyzed = plan is not None
@@ -604,12 +622,18 @@ class RenderingService:
         if request.layout_style == LayoutStyle.FIT:
             return None
         try:
-            return await self.layout_analyzer.analyze(
+            plan = await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, request.layout_style,
                 **({"capture": True} if request.debug_capture else {}),
                 **({'progress': lambda detail, percent: request.progress_callback(
                     detail if percent is None else f'{detail} {percent}%', None)} if request.progress_callback else {}),
             )
+            if plan is not None and request.layout_style in (LayoutStyle.FILL, LayoutStyle.AUTO, LayoutStyle.DEBATE):
+                from clip_engine.services.speaker_follow import debate_speakers, follow_speakers
+                follow = debate_speakers if request.layout_style == LayoutStyle.DEBATE else follow_speakers
+                plan = await asyncio.to_thread(follow, plan, request.video_path, window_start_ms,
+                                               request.source_transcript or request.transcript_segments or [])
+            return plan
         except Exception as e:
             logger.warning(f"Layout analysis failed, falling back to letterbox: {e}", exc_info=True)
             return None
@@ -669,10 +693,14 @@ class RenderingService:
         overlays: list[Overlay] = []
         # Landscape overlays were sized for 1080p; scale them with the output.
         scale = target_height / 1080 if is_landscape else 1.0
-        title = self._title_overlay_image(request, target_width, scale)
+        if any(s.manual_top_share for s in out_plan.shots):
+            scale *= DEBATE_TITLE_SCALE
+        title = self._title_overlay_image(request, target_width, scale * request.title_scale)
         if title:
             path, _, height = title
-            if is_landscape:
+            if request.title_y is not None:
+                overlays.append((path, "(W-w)/2", f"{max(0, min(target_height - height, round(target_height * request.title_y - height / 2)))}"))
+            elif is_landscape:
                 show_from, show_to = LANDSCAPE_TITLE_SHOW_S
                 fade = LANDSCAPE_TITLE_FADE_S
                 overlays.append((
@@ -775,7 +803,11 @@ class RenderingService:
             os.path.dirname(request.output_path),
             f"title-{request.start_time_ms}-{request.end_time_ms}.png",
         )
-        result = self._build_title_card(request.title_text, target_width, 0, path, scale)
+        font = request.title_font
+        result = self._build_title_card(request.title_text, target_width, 0, path, scale, font)
+        if result and result["width"] > target_width * .94:
+            # A large size on a long title: shrink to fit the frame.
+            result = self._build_title_card(request.title_text, target_width, 0, path, scale * target_width * .94 / result["width"], font)
         if not result:
             return None
         return path, result["width"], result["height"]
@@ -948,6 +980,7 @@ class RenderingService:
         overlay_y: int,
         output_path: str,
         scale: float = 1.0,
+        font_name: str = 'montserrat',
     ) -> Optional[dict]:
         """Generate a rounded-rect PNG with title text and return positioning info."""
         # The planner is asked for 2-7 words; a runaway model title would
@@ -960,16 +993,17 @@ class RenderingService:
 
         words = clean.split()
 
-        if len(words) < 2:
-            words = (words * 2)[:2]
-        elif len(words) > 7:
-            words = words[:7]
-
+        # Every word is kept: dropping the end of a title can leave it
+        # ungrammatical. Up to 3 words fit one line; longer titles balance
+        # over lines of about 4 words (EditorCaptionPreview.titleLines).
         if len(words) <= 3:
             lines = [" ".join(words)]
         else:
-            mid = (len(words) + 1) // 2
-            lines = [" ".join(words[:mid]), " ".join(words[mid:])]
+            count, lines, start = max(2, -(-len(words) // 4)), [], 0
+            for i in range(count):
+                end = start - (-(len(words) - start) // (count - i))
+                lines.append(" ".join(words[start:end]))
+                start = end
 
         font_size = round(42 * scale)
         pad_x = round(28 * scale)
@@ -978,7 +1012,8 @@ class RenderingService:
         corner_radius = round(16 * scale)
 
         try:
-            font = ImageFont.truetype(self._font_path, font_size)
+            font_file = TITLE_FONTS.get(font_name) if font_name != 'montserrat' and self._fonts_dir else None
+            font = ImageFont.truetype(os.path.join(self._fonts_dir, font_file) if font_file else self._font_path, font_size)
         except Exception:
             font = ImageFont.load_default()
 

@@ -76,7 +76,7 @@ def test_youtube_downloads_prefer_highest_quality_without_av1():
 def test_disk_full_is_reported_through_wrapped_errors():
     import errno
 
-    from clip_engine.error_policy import safe_processing_error
+    from clip_engine.error_policy import safe_job_error_text, safe_processing_error
     from clip_engine.services.video_downloader import VideoDownloadError
 
     disk_full = "Not enough disk space to save clips"
@@ -91,6 +91,10 @@ def test_disk_full_is_reported_through_wrapped_errors():
     except VideoDownloadError as wrapped:
         assert safe_processing_error(wrapped) == disk_full
     assert safe_processing_error(VideoDownloadError("HTTP Error 403")) == "Video download failed"
+    # Both the metadata and the media step surface YouTube's bot check without leaking the URL.
+    for text in ("YouTube is temporarily blocking this request. Please try again", "Failed to download video: ERROR: [youtube] x: Sign in to confirm you're not a bot"):
+        assert safe_processing_error(VideoDownloadError(text)) == "YouTube is blocking this request"
+    assert safe_job_error_text("YouTube is blocking this request") == "YouTube is blocking this request"
 
 
 def test_download_stops_before_filling_the_disk(tmp_path):

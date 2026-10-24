@@ -1,3 +1,4 @@
+import { existsSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { basename, join } from 'path'
 import { dialog, shell, type BrowserWindow } from 'electron'
@@ -16,6 +17,7 @@ import { getJobHistory, getJobOutput } from '../file-manager'
 import { cancelTrackedJob, getJob, listJobs, liveJobIds, onJobUpdate } from '../job-manager'
 import { startClipJobRequest } from '../job-start'
 import { authorizeMedia, isWebUrl } from '../security'
+import { runFolder } from '../run-history'
 import { getYouTubePreview } from '../youtube-preview'
 import { resolveBinary } from '../tools'
 import { findYouTubeVideos, ytDlpRunner } from './youtube-discovery'
@@ -38,6 +40,10 @@ import { getZernioOverview, readCachedOverview } from '../zernio/service'
 import { cancelPost, listPosts, probeClipForPosting, publishClip, refreshPosts, reschedulePost, retryPost } from '../zernio/posts'
 import { logger } from '../logger'
 import { AssistantToolError, type AssistantToolSpec } from './tool-types'
+
+/** Where "Browse" for a video opens: the downloader's folder on the SanDisk drive, when it is plugged in. */
+const VIDEO_FOLDER = '/Volumes/SanDiskSSD/zen downloader'
+const videoFolder = (): string | undefined => existsSync(VIDEO_FOLDER) ? VIDEO_FOLDER : undefined
 
 export type DataScope = 'library' | 'automations' | 'posts' | 'settings' | 'accounts'
 export type AppPage = 'clip' | 'library' | 'jobs' | 'accounts' | 'posts' | 'automations' | 'settings'
@@ -66,7 +72,7 @@ function seconds(ms: number | null | undefined): number | null {
 
 function libraryPath(runId: unknown): string {
   if (typeof runId !== 'string' || !UUID.test(runId)) throw new AssistantToolError('runId must be a run id from list_library_runs.')
-  return join(loadSettings().outputDirectory, runId)
+  return runFolder(loadSettings().outputDirectory, runId) ?? join(loadSettings().outputDirectory, runId)
 }
 
 /** Source shown to the agent: links as-is, local files by name only. */
@@ -329,6 +335,7 @@ export function createBridgeClipTools(host: ToolHost): AssistantToolSpec[] {
         const result = await dialog.showOpenDialog(window, {
           properties: ['openFile'],
           title: 'Choose a video to clip',
+          defaultPath: videoFolder(),
           filters: [{ name: 'Video Files', extensions: ['mp4', 'm4v', 'mkv', 'webm', 'avi', 'mov', 'flv'] }]
         })
         if (result.canceled || !result.filePaths.length) return { picked: false, summary: 'No file chosen' }

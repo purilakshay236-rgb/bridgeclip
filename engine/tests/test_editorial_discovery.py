@@ -29,7 +29,7 @@ def test_candidate_construction_includes_setup_and_payoff_before_review():
     assert candidate.moment['setup']['speaker'] == 'S2'
 
 
-def test_jev_anchor_mismatch_is_logged_and_audited_not_silent(caplog):
+def test_jev_anchor_mismatch_keeps_clip_for_review_and_is_audited(caplog):
     planner = make_planner()
     planner._jev_enabled = True
     planner.audit = {'requests': []}
@@ -39,10 +39,26 @@ def test_jev_anchor_mismatch_is_logged_and_audited_not_silent(caplog):
              {**clip(45, 54.5), 'moment': moment()}]            # runs past its own topic
     with caplog.at_level('WARNING'):
         result = planner._parse_clip_plan_response(completion(json.dumps({'clips': clips})))
-    assert result.segments == []
-    reasons = [d['reason'] for d in planner.audit['discarded']]
+    assert [s.moment for s in result.segments] == [None, None]
+    assert sorted((s.start_time_ms, s.end_time_ms) for s in result.segments) == [(10000, 19500), (45000, 54500)]
+    reasons = [d['reason'] for d in planner.audit['anchors_ignored']]
     assert reasons[0].startswith('moment anchors') and reasons[1] == 'excerpt extends outside its moment topic'
-    assert caplog.text.count('Discarding planner candidate') == 2
+    assert 'discarded' not in planner.audit
+    assert caplog.text.count('Ignoring anchors on planner candidate') == 2
+
+
+def test_chosen_minimum_length_widens_within_topic_or_drops():
+    planner = make_planner()
+    planner._jev_enabled = True
+    planner.audit = {'requests': []}
+    planner._current_transcript = make_transcript(60).segments
+    planner._current_video_duration = 60
+    planner._current_min_duration, planner._current_duration_ranges = 30, ['short']
+    clips = [{**clip(10, 19.5), 'moment': moment()},           # 24.5s with anchors; topic runs to 39.5s
+             {**clip(5, 14.5), 'moment': {**moment(), 'topic_end_segment': 3, 'payoff_segment': 2}}]  # topic only 19.5s
+    result = planner._parse_clip_plan_response(completion(json.dumps({'clips': clips})))
+    assert [(s.start_time_ms, s.end_time_ms) for s in result.segments] == [(5000, 39500)]
+    assert planner.audit['discarded'][0]['reason'].startswith('shorter than the chosen 30s minimum')
 
 
 def test_invalid_narrative_anchors_are_rejected():

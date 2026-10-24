@@ -117,6 +117,11 @@ test('the title card is shown by default and can be turned off for automatic run
     original.update({ workflow: 'automatic', source: 'https://example.com/video' })
     const automatic = renderToStaticMarkup(React.createElement(CaptionsStep, { draft: useDraftStore.getState(), update() {} }))
     assert.match(automatic, /Show title at the top/)
+    assert.match(automatic, /Custom highlighted word colour/)
+    assert.equal(buildJobRequest(useDraftStore.getState(), { start: null, end: null }).captionColors, undefined)
+    original.update({ captionColors: { caption_highlight: '#FF0000' } })
+    assert.deepEqual(buildJobRequest(useDraftStore.getState(), { start: null, end: null }).captionColors, { caption_highlight: '#FF0000' })
+    original.update({ captionColors: {} })
     assert.equal(buildJobRequest(useDraftStore.getState(), { start: null, end: null }).includeTitle, true)
     original.update({ includeTitle: false })
     assert.equal(buildJobRequest(useDraftStore.getState(), { start: null, end: null }).includeTitle, false)
@@ -125,6 +130,7 @@ test('the title card is shown by default and can be turned off for automatic run
     // Review exports never draw a title card, so the switch is not offered there.
     const review = renderToStaticMarkup(React.createElement(CaptionsStep, { draft: { ...useDraftStore.getState(), workflow: 'review' }, update() {} }))
     assert.doesNotMatch(review, /Show title at the top/)
+    assert.doesNotMatch(review, /Custom highlighted word colour/)
   } finally { useDraftStore.setState(original) }
 })
 

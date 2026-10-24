@@ -74,6 +74,7 @@ def get_landscape_dimensions(source_width: int, source_height: int) -> tuple[int
 DURATION_RANGES: dict[str, tuple[int, int, str]] = {
     "xshort": (10, 30, "10-30 seconds (quick, punchy clips)"),
     "short": (30, 60, "30-60 seconds (short clips)"),
+    "standard": (45, 90, "45-90 seconds (short clips with room for context)"),
     "medium": (60, 120, "1-2 minutes (moderate length clips)"),
     "long": (120, 300, "2-5 minutes (longer, in-depth clips)"),
     "xlong": (300, 600, "5-10 minutes (extra long clips)"),
@@ -126,8 +127,10 @@ class LayoutStyle:
     AUTO = "auto"  # detect each shot's layout and switch mid-clip
     FILL = "fill"  # always fill the frame, following the speaker
     FIT = "fit"    # classic: whole frame over a blurred background
+    SPLIT = "split"  # one fixed top/bottom split for every clip, set once per job
+    DEBATE = "debate"  # both speakers on top, the current speaker large below
 
-    ALL = (AUTO, FILL, FIT)
+    ALL = (AUTO, FILL, FIT, SPLIT, DEBATE)
 
 
 def get_available_layout_styles() -> list[dict]:
@@ -148,6 +151,11 @@ def get_available_layout_styles() -> list[dict]:
             "id": LayoutStyle.FIT,
             "name": "Classic",
             "description": "Shows the whole original frame over a blurred background.",
+        },
+        {
+            "id": LayoutStyle.DEBATE,
+            "name": "Debate",
+            "description": "Both speakers on top; below, a close-up of whoever is talking that switches when the speaker changes.",
         },
     ]
 

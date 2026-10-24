@@ -2,7 +2,7 @@ import { parseRunDiagnostics } from '../shared/run-diagnostics'
 import { parseStages } from '../shared/job-progress'
 import { ChildProcess, spawn, execFile, execFileSync } from 'child_process'
 import { app } from 'electron'
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync } from 'fs'
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from 'fs'
 import { delimiter, dirname, join, resolve } from 'path'
 import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
@@ -14,7 +14,7 @@ import { parseJobOutput, type JobOutput } from '../shared/job-output'
 import { BRIDGE_CONTRACT_VERSION } from '../shared/job-contract'
 import type { ClipJobRequest } from '../shared/jobs'
 import type { OpenRouterModel } from '../shared/openrouter-models'
-import { finishRunRecord, type StoredRunStatus } from './run-history'
+import { finishRunRecord, nameRunAfterVideo, type StoredRunStatus } from './run-history'
 import { resolveBinary } from './tools'
 
 export type ClipJobConfig = ClipJobRequest & { plannerCapabilities?: OpenRouterModel }
@@ -55,7 +55,23 @@ export interface ErrorUpdate {
   http_status?: number
 }
 
-type BridgeMessage = ProgressUpdate | ResultUpdate | ErrorUpdate
+/** Split style: the engine waits for one stdin reply with the user's crops. */
+export interface FramingUpdate {
+  type: 'framing'
+  image: string
+  width: number
+  height: number
+  crops: number[][]
+}
+
+type BridgeMessage = ProgressUpdate | ResultUpdate | ErrorUpdate | FramingUpdate
+
+/** Two normalized (x, y, w, h) crops inside the frame. */
+export function validSplitCrops(value: unknown): value is number[][] {
+  return Array.isArray(value) && value.length === 2 && value.every((c) =>
+    Array.isArray(c) && c.length === 4 && c.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
+    c[0] >= 0 && c[1] >= 0 && c[2] > 0 && c[2] <= 1 && c[3] > 0 && c[3] <= 1 && c[0] + c[2] <= 1.001 && c[1] + c[3] <= 1.001)
+}
 
 function safeBridgeText(value: unknown): string {
   if (typeof value !== 'string' || value.length > 300 || /https?:\/\/|[\\/]|(?:token|secret|key)\s*[:=]/i.test(value)) {
@@ -406,7 +422,7 @@ export function startClipJob(
     } catch { logger.warn('job.history.writeFailed', { jobId }) }
     send('job:error', payload)
   }
-  const envVars = getSettingsForBridge({ ...settings, jevEnabled: config.workflow === 'review' ? 'on' : settings.jevEnabled })
+  const envVars = getSettingsForBridge(settings)
   const enginePath = getEnginePath()
   const bridgePath = getBridgeRunnerPath()
   const pythonPath = resolvePythonPath(enginePath, settings.pythonPath)
@@ -468,6 +484,7 @@ export function startClipJob(
     video_speed: config.videoSpeed ?? 1,
     include_captions: config.includeCaptions,
     caption_preset: config.captionPreset,
+    caption_colors: config.captionColors ?? {},
     include_title: config.includeTitle ?? true,
     keyterms: vocabularyTerms(settings.customVocabulary),
     start_time_seconds: config.startTimeSeconds,
@@ -521,7 +538,9 @@ export function startClipJob(
   }
 
   child.stdin?.on('error', () => { /* Process close/error reports startup failures. */ })
-  child.stdin?.end(jobConfig)
+  // Split jobs keep stdin open for the one framing reply (sendFraming).
+  if (config.layoutStyle === 'split') child.stdin?.write(jobConfig + '\n')
+  else child.stdin?.end(jobConfig + '\n')
 
   logger.info('job.spawned', { jobId, pid: child.pid })
 
@@ -593,6 +612,13 @@ export function startClipJob(
             errored = true
             logger.error('job.bridge.invalidResult', { jobId })
             reportError({ jobId, message: 'The clipping engine returned an unsupported result.' })
+          }
+        } else if (msg.type === 'framing') {
+          if (typeof msg.image === 'string' && msg.image.startsWith('data:image/jpeg;base64,') && validSplitCrops(msg.crops) &&
+              Number.isInteger(msg.width) && Number.isInteger(msg.height) && msg.width > 0 && msg.height > 0) {
+            send('job:framing', { jobId, image: msg.image, width: msg.width, height: msg.height, crops: msg.crops })
+          } else {
+            child.stdin?.end() // the engine keeps its detected crops
           }
         } else if (msg.type === 'error') {
           errored = true
@@ -679,7 +705,11 @@ export function startClipJob(
     if (code === 0 && pendingOutput) {
       completed = true
       finishHistory('completed')
-      send('job:complete', { type: 'result', status: 'completed', jobId, job_id: jobId, output: pendingOutput })
+      // The folder takes the video's title once the run is done; its clip links move with it.
+      const outputDir = nameRunAfterVideo(settings.outputDirectory, jobId, pendingOutput.source_video_title)
+      let output = pendingOutput
+      try { output = parseJobOutput(JSON.parse(readFileSync(join(outputDir, 'job_output.json'), 'utf8'))) ?? pendingOutput } catch { /* Keep the engine's result. */ }
+      send('job:complete', { type: 'result', status: 'completed', jobId, job_id: jobId, output, outputDir })
       return
     }
 
@@ -717,6 +747,14 @@ export function startClipJob(
     }
     reportError(payload)
   }
+}
+
+/** Send the user's split crops (or nothing, to keep the detected ones) and close stdin. */
+export function sendFraming(jobId: string, crops: number[][] | null): boolean {
+  const stdin = activeProcesses.get(jobId)?.stdin
+  if (!stdin || stdin.writableEnded) return false
+  stdin.end(crops ? JSON.stringify({ crops }) + '\n' : '')
+  return true
 }
 
 export function cancelJob(jobId: string): boolean {

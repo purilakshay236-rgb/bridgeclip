@@ -93,7 +93,7 @@ function safeMetrics(value: unknown): Record<string, unknown> | null {
       if (model !== null) safe[field] = model
     }
     if (requested.aspect_ratio === '9:16' || requested.aspect_ratio === '16:9') safe.aspect_ratio = requested.aspect_ratio
-    if (['auto', 'fill', 'fit'].includes(requested.layout_style as string)) safe.layout_style = requested.layout_style
+    if (['auto', 'fill', 'fit', 'split', 'debate'].includes(requested.layout_style as string)) safe.layout_style = requested.layout_style
     if (typeof requested.layout_vision_enabled === 'boolean') safe.layout_vision_enabled = requested.layout_vision_enabled
     if (requested.pacing === 'tight' || requested.pacing === 'natural') safe.pacing = requested.pacing
     if (typeof requested.video_speed === 'number' && Number.isFinite(requested.video_speed) && requested.video_speed >= 1 && requested.video_speed <= 2) safe.video_speed = requested.video_speed

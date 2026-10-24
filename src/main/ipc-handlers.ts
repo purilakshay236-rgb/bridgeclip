@@ -7,7 +7,7 @@ import { getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
 import { measureOutputStorage } from './output-storage'
 import { inspectEdits } from './edit-inspector'
 import { getEnginePath, getBridgeRunnerPath, resolvePythonPath, validatePython } from './pipeline-runner'
-import { cancelTrackedJob, dismissJob, initJobManager, listJobs, liveJobIds } from './job-manager'
+import { cancelTrackedJob, dismissJob, initJobManager, listJobs, liveJobIds, submitFraming } from './job-manager'
 import { startClipJobRequest } from './job-start'
 import { logger, getLogFilePath } from './logger'
 import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedia, isTrustedExternalUrl, isWebUrl, isWithinDirectory, openAuthorizedMedia } from './security'
@@ -45,6 +45,10 @@ import {
   reschedulePost,
   retryPost
 } from './zernio/posts'
+
+/** Where "Browse" for a video opens: the downloader's folder on the SanDisk drive, when it is plugged in. */
+const VIDEO_FOLDER = '/Volumes/SanDiskSSD/zen downloader'
+const videoFolder = (): string | undefined => existsSync(VIDEO_FOLDER) ? VIDEO_FOLDER : undefined
 
 export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): void {
   const selectedOutputDirectories = new Set<string>()
@@ -161,6 +165,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return cancelTrackedJob(jobId)
   })
 
+  handle('job:framing', (_event, jobId: unknown, crops: unknown) => typeof jobId === 'string' && submitFraming(jobId, crops))
   handle('jobs:list', () => listJobs())
   handle('jobs:dismiss', (_event, jobId: unknown) => typeof jobId === 'string' && dismissJob(jobId))
 
@@ -253,6 +258,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     const result = await dialog.showOpenDialog(window, {
       properties: ['openFile'],
       title: 'Choose a Video',
+      defaultPath: videoFolder(),
       filters: [
         { name: 'Video Files', extensions: ['mp4', 'm4v', 'mkv', 'webm', 'avi', 'mov', 'flv'] },
         { name: 'All Files', extensions: ['*'] }

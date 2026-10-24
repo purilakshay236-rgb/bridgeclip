@@ -31,6 +31,7 @@ async function checkedRun(raw: unknown): Promise<{ check: () => string; output: 
   check()
   const output = await getJobOutput(path, library)
   if (!output) throw new Error('This completed run is no longer available in your Library.')
+  if (liveJobIds().has(output.job_id)) throw new Error('Wait for this run to finish before changing it.')
   check()
   return { check, output, library, identity: { dev: original.dev, ino: original.ino } }
 }
@@ -66,7 +67,7 @@ export async function deleteLibraryRun(outputDir: unknown): Promise<void> {
     try { renameSync(trash, path) } catch { /* Best effort: it is still a folder directly inside the Library. */ }
     throw new Error('The Library run changed. Refresh and try again.')
   }
-  dismissJob(basename(path))
+  dismissJob(output.job_id || basename(path))
   // Never follow the manifest's media paths. Remove only this validated run
   // directory; recursive rm unlinks internal symlinks rather than their targets.
   try { rmSync(trash, { recursive: true }) } catch {

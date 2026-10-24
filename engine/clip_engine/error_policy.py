@@ -55,6 +55,8 @@ def safe_processing_error(error: Exception) -> str:
     if type(error).__name__ == "VisualPlanningUnsupportedError":
         return "Selected planner requires a video with speech"
     if type(error).__name__ == "VideoDownloadError":
+        if any(m in str(error).lower() for m in ("sign in to confirm", "blocking this request")):
+            return "YouTube is blocking this request"
         return TWITCH_ERRORS.get(getattr(error, "reason", None), "Video download failed")
     if type(error).__name__ == "TranscriptionProviderError":
         return {
@@ -123,7 +125,7 @@ def safe_job_error_text(error: str | None) -> str | None:
     if error in TWITCH_ERRORS.values():
         return error
     if error in {
-        "Processing timed out", "Video download failed", "No clip-worthy moments found",
+        "Processing timed out", "Video download failed", "YouTube is blocking this request", "No clip-worthy moments found",
         "Selected planner requires a video with speech",
         "Processing failed", "Job cancelled", "Transcription authentication failed",
         "Transcription quota or rate limit reached", "Transcription service unavailable",

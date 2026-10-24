@@ -62,7 +62,7 @@ def manual(scenes, ranges=((1000, 4000), (5000, 9000))):
 def graphs():
     moving = manual([{'at_ms': 0, 'layout': 'fill', 'crops': [[0, 0, .3164, 1]]},
                      {'at_ms': 2000, 'layout': 'fill', 'crops': [[.5, .5, .1, .3]], 'transition_ms': 1500},
-                     {'at_ms': 6000, 'layout': 'split', 'crops': [[0, 0, .5, .5], [.5, .5, .5, .5]]},
+                     {'at_ms': 6000, 'layout': 'split', 'crops': [[0, 0, .5, .5], [.5, .5, .5, .5]], 'mirror': [False, True]},
                      {'at_ms': 7000, 'layout': 'split', 'crops': [[.1, .1, .4, .4], [0, 0, .6, .6]], 'transition_ms': 800},
                      {'at_ms': 8500, 'layout': 'fit', 'crops': [[0, 0, 1, 1]]}])
     face, cam = Box(.4, .2, .1, .2), Box(.75, .7, .2, .25)
@@ -144,6 +144,26 @@ def test_emitted_filters_are_in_the_shipped_lgpl_build(tmp_path, monkeypatch):
     # Guard the parser itself: these must be seen, or the check is vacuous.
     assert {'scale', 'crop', 'trim', 'concat', 'overlay', 'ass', 'loudnorm', 'atempo', 'select'} <= emitted
     assert emitted <= allowed, f'Not in the shipped LGPL FFmpeg: {sorted(emitted - allowed)}'
+
+
+def test_swapped_debate_puts_the_tall_panel_on_top_and_mirrors_only_flagged_panels():
+    import pytest as _pytest
+    from clip_engine.services.layout_renderer import manual_views, shot_chain
+    from clip_engine.services.manual_editor import validate_candidate
+    scene = {'at_ms': 0, 'layout': 'debate', 'crops': [[.4, 0, .3, .9], [0, 0, 1, .9]], 'swapped': True, 'mirror': [True, False]}
+    (shot,) = manual([scene], ((1000, 4000),)).shots
+    (_, (_, top_y, _, top_h)), (_, (_, low_y, _, low_h)) = manual_views(shot, 1920, 1080, 1080, 1920)
+    assert (top_y, top_h, low_y, low_h) == (0, 1248, 1248, 672)
+    chain = shot_chain(0, shot, 1920, 1080, 1080, 1920)
+    assert chain.count('hflip') == 1 and 'hflip,setsar=1[mp0_0]' in chain
+    candidate = {'title': 'x', 'ranges': [[1000, 4000]], 'scenes': [scene], 'video_speed': 1, 'captions': True}
+    validate_candidate(candidate, 12000)
+    for bad in ({'swapped': 1}, {'mirror': [True]}, {'mirror': ['yes', False]}):
+        with _pytest.raises(ValueError):
+            validate_candidate({**candidate, 'scenes': [{**scene, **bad}]}, 12000)
+    moving = {**candidate, 'scenes': [{**scene, 'swapped': False}, {**scene, 'at_ms': 2000, 'transition_ms': 600}]}
+    with _pytest.raises(ValueError, match='movement'):
+        validate_candidate(moving, 12000)
 
 
 def test_filter_parser_handles_quoted_expressions():

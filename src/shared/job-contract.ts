@@ -1,6 +1,7 @@
 export const DURATION_OPTIONS = [
   { id: 'xshort', label: 'Extra short', range: '10–30s' },
   { id: 'short', label: 'Short', range: '30–60s' },
+  { id: 'standard', label: 'Standard', range: '45–90s' },
   { id: 'medium', label: 'Medium', range: '1–2m' },
   { id: 'long', label: 'Long', range: '2–5m' },
   { id: 'xlong', label: 'Extra long', range: '5–10m' },

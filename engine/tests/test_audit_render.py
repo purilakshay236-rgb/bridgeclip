@@ -292,6 +292,19 @@ def test_title_card_is_bounded(tmp_path):
     assert service._build_title_card("  \n\t ", 1080, 0, str(tmp_path / "empty.png")) is None
 
 
+def test_title_card_keeps_every_word_and_uses_the_chosen_font(tmp_path):
+    service = RenderingService.__new__(RenderingService)
+    service._font_path = service._resolve_font()
+    service._fonts_dir = service._resolve_fonts_dir()
+    seven = service._build_title_card("One Two Three Four Five Six Seven", 1080, 0, str(tmp_path / "seven.png"))
+    nine = service._build_title_card("One Two Three Four Five Six Seven Eight Nine", 1080, 0, str(tmp_path / "nine.png"))
+    # Words past the seventh are wrapped onto a third line, not dropped.
+    assert nine["height"] > seven["height"]
+    serif = service._build_title_card("One Two Three", 1080, 0, str(tmp_path / "serif.png"), font_name="serif")
+    default = service._build_title_card("One Two Three", 1080, 0, str(tmp_path / "default.png"))
+    assert serif["width"] != default["width"]
+
+
 @pytest.mark.parametrize("is_landscape", [False, True])
 def test_title_card_can_be_turned_off(tmp_path, is_landscape):
     service = RenderingService.__new__(RenderingService)

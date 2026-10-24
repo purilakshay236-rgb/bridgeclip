@@ -16,7 +16,7 @@
     "url": "https://github.com/bridge-mind/bridgeclip/issues"
   },
   "scripts": {
-    "dev": "install-electron && electron-vite dev",
+    "dev": "install-electron && electron-vite dev -w",
     "build": "electron-vite build",
     "preview": "install-electron && electron-vite preview",
     "postinstall": "electron-builder install-app-deps",

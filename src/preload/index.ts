@@ -119,7 +119,7 @@ export interface BridgeClipAPI {
   editor: {
     open: (path: string) => Promise<EditorSession>
     save: (path: string, revision: number, edits: CandidateEdit[]) => Promise<EditorSession>
-    run: (path: string, revision: number, id: string, action: 'review' | 'export' | 'export-all' | 'scan-cameras') => Promise<EditorSession>
+    run: (path: string, revision: number, id: string, action: 'review' | 'export' | 'export-all' | 'scan-cameras' | 'follow-speaker') => Promise<EditorSession>
     cancel: (path: string) => Promise<void>
     replaceSource: (path: string, revision: number, replacement: string) => Promise<EditorSession>
     /** Status counts only; cheap enough for list rows and polling. */
@@ -207,6 +207,8 @@ export interface BridgeClipAPI {
     /** Queues a clipping run; it starts right away when a slot is free (`queued: false`). */
     start: (config: ClipJobRequest) => Promise<{ jobId?: string; queued?: boolean; job?: JobSnapshot; error?: string }>
     cancel: (jobId: string) => Promise<boolean>
+    /** Confirm a split job's framing (normalized top/bottom crops); null keeps the detected ones. */
+    setFraming: (jobId: string, crops: number[][] | null) => Promise<boolean>
     /** Every job the main process knows about this session, newest first. */
     list: () => Promise<JobSnapshot[]>
     /** Forget a finished job for this session; its run folder stays in the library. */
@@ -381,6 +383,7 @@ const api: BridgeClipAPI = {
   job: {
     start: (config) => ipcRenderer.invoke('job:start', config),
     cancel: (jobId) => ipcRenderer.invoke('job:cancel', jobId),
+    setFraming: (jobId, crops) => ipcRenderer.invoke('job:framing', jobId, crops),
     list: () => ipcRenderer.invoke('jobs:list'),
     dismiss: (jobId) => ipcRenderer.invoke('jobs:dismiss', jobId),
     onUpdate: (callback) => subscribe('jobs:update', callback)

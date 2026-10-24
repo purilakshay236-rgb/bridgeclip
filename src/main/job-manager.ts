@@ -1,7 +1,7 @@
 import { parseRunDiagnostics } from '../shared/run-diagnostics'
 import { parseStages } from '../shared/job-progress'
-import { join } from 'path'
-import { cancelJob as cancelRunningJob, startClipJob, type ClipJobConfig, type JobEventSink } from './pipeline-runner'
+import { dirname, join } from 'path'
+import { cancelJob as cancelRunningJob, sendFraming, startClipJob, validSplitCrops, type ClipJobConfig, type JobEventSink } from './pipeline-runner'
 import { finishRunRecord } from './run-history'
 import { logger } from './logger'
 import { parseJobOutput } from '../shared/job-output'
@@ -60,7 +60,7 @@ function finish(jobId: string, status: Extract<JobStatus, 'completed' | 'failed'
     ...stage, state: status, percent: status === 'completed' ? 100 : stage.percent,
     elapsed_ms: stage.elapsed_ms + Math.max(0, now - (previous.progressAt ?? now))
   })
-  update(jobId, { ...patch, ...(stages ? { stages, progressAt: now } : {}), status, finishedAt: new Date(now).toISOString() })
+  update(jobId, { ...patch, ...(stages ? { stages, progressAt: now } : {}), status, framing: null, finishedAt: new Date(now).toISOString() })
   pruneFinished()
 }
 
@@ -144,10 +144,15 @@ function onRunnerEvent(jobId: string, channel: string, payload: unknown): void {
       clipsDone: number(data.clips_done, job.snapshot.clipsDone),
       clipsTotal: number(data.clips_total, job.snapshot.clipsTotal)
     })
+  } else if (channel === 'job:framing') {
+    if (typeof data.image === 'string' && typeof data.width === 'number' && typeof data.height === 'number' && validSplitCrops(data.crops)) {
+      update(jobId, { framing: { image: data.image, width: data.width, height: data.height, crops: data.crops } })
+    }
   } else if (channel === 'job:complete') {
     const output = parseJobOutput(data.output)
     if (output) {
-      finish(jobId, 'completed', { output, percent: 100, step: 'Complete', clipsDone: output.total_clips, clipsTotal: output.total_clips })
+      finish(jobId, 'completed', { output, percent: 100, step: 'Complete', clipsDone: output.total_clips, clipsTotal: output.total_clips,
+        ...(typeof data.outputDir === 'string' && dirname(data.outputDir) === job.outputDirectory ? { outputDir: data.outputDir } : {}) })
     } else {
       finish(jobId, 'failed', { error: 'The clipping engine returned an unsupported result.', step: 'Failed' })
     }
@@ -161,6 +166,15 @@ function onRunnerEvent(jobId: string, channel: string, payload: unknown): void {
       step: 'Failed'
     })
   }
+}
+
+/** Confirm a waiting split framing; null keeps the detected crops. */
+export function submitFraming(jobId: string, crops: unknown): boolean {
+  const job = jobs.get(jobId)
+  if (!job?.snapshot.framing || (crops !== null && !validSplitCrops(crops))) return false
+  if (!sendFraming(jobId, crops)) return false
+  update(jobId, { framing: null })
+  return true
 }
 
 /** Cancel a queued or running job. Returns false when there is nothing to cancel. */

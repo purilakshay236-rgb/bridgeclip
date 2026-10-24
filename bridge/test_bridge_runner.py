@@ -147,6 +147,27 @@ class BridgeTests(unittest.TestCase):
             "PLANNER_FALLBACK_MODELS": "", "LAYOUT_VISION_ENABLED": "false",
         }])
 
+    def test_caption_colours_override_the_preset(self):
+        seen = {}
+        def request(**kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop")
+        style = lambda name: types.SimpleNamespace(primary_color="#FFFFFF", highlight_color="#FFE234", highlight_box_color=None)
+        modules = {
+            "clip_engine.config": types.SimpleNamespace(get_settings=lambda: types.SimpleNamespace(openrouter_api_key="k", assemblyai_api_key="k"), get_caption_preset=style),
+            "clip_engine.bridge_contract": types.SimpleNamespace(BRIDGE_CONTRACT_VERSION=3),
+            "clip_engine.logging_safety": types.SimpleNamespace(install_safe_logging=lambda: None),
+            "clip_engine.services.ai_clipping_pipeline": types.SimpleNamespace(AIClippingPipeline=None, ClippingJobRequest=request, JobStatus=None),
+        }
+        colors = {"caption_color": "#FF0000", "caption_highlight": "bad", "caption_box": "#00FF00"}
+        with patch.dict(sys.modules, modules), redirect_stdout(io.StringIO()):
+            try:
+                asyncio.run(bridge.run(self.config(caption_colors=colors)))
+            except RuntimeError:
+                pass
+        s = seen["caption_style"]
+        self.assertEqual((s.primary_color, s.highlight_color, s.highlight_box_color), ("#FF0000", "#FFE234", None))
+
     def test_malformed_json_has_structured_error_and_failure_exit(self):
         output = io.StringIO()
         with patch.object(sys, "argv", ["bridge_runner.py", "[]"]), redirect_stdout(output):
@@ -188,6 +209,18 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.main(), 0)
         with patch.object(sys, "argv", ["bridge_runner.py"]), patch.object(sys, "stdin", io.StringIO(" " * 65537)), redirect_stdout(io.StringIO()):
             self.assertEqual(bridge.main(), 1)
+
+    def test_split_framing_reply_follows_the_config_line(self):
+        crops = [[0.1, 0, 0.3, 0.5], [0.6, 0.5, 0.3, 0.5]]
+        stdin = io.StringIO(json.dumps(self.config(layout_style="split")) + "\n" + json.dumps({"crops": crops}) + "\n")
+        with patch.object(sys, "stdin", stdin), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(bridge.validate_config(json.loads(sys.stdin.readline()))["layout_style"], "split")
+            self.assertEqual(asyncio.run(bridge.framing_callback({"image": "x", "width": 2, "height": 1, "crops": crops})), crops)
+        self.assertEqual(json.loads(out.getvalue())["type"], "framing")
+        # Closed stdin or a bad reply keeps the detected crops.
+        for reply in ("", "not json\n", json.dumps({"crops": [[0.9, 0, 0.3, 0.5], crops[1]]}) + "\n", json.dumps({"crops": [crops[0]]}) + "\n"):
+            with self.subTest(reply=reply), patch.object(sys, "stdin", io.StringIO(reply)), redirect_stdout(io.StringIO()):
+                self.assertIsNone(asyncio.run(bridge.framing_callback({})))
 
     def test_provider_errors_do_not_disclose_exception_text(self):
         output = io.StringIO()
@@ -258,6 +291,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.describe_failure("Not enough disk space to save clips")["message"],
                          "There is not enough free disk space to finish this video.")
         self.assertEqual(bridge.describe_failure("Video download failed")["message"], "The video could not be downloaded.")
+        self.assertEqual(bridge.describe_failure("YouTube is blocking this request")["message"], "YouTube asked BridgeClip to confirm it isn't a bot.")
 
     def test_twitch_failures_are_actionable_and_safe_for_the_desktop(self):
         cases = {

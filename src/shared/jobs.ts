@@ -24,6 +24,8 @@ export interface ClipJobRequest {
   videoSpeed?: number
   includeCaptions: boolean
   captionPreset: string
+  /** Caption colour overrides (#RRGGBB); a missing key keeps the preset's colour. */
+  captionColors?: Partial<Record<'caption_color' | 'caption_highlight' | 'caption_box', string>>
   /** Title card at the top of Automatic clips. Older requests default to shown. */
   includeTitle?: boolean
   startTimeSeconds: number | null
@@ -76,4 +78,15 @@ export interface JobSnapshot {
   queuedAt: string
   startedAt: string | null
   finishedAt: string | null
+  /** Split style: the engine is waiting for the user to confirm these crops on this frame. */
+  framing?: JobFraming | null
+}
+
+export interface JobFraming {
+  /** A JPEG data URL of one source frame. */
+  image: string
+  width: number
+  height: number
+  /** Normalized (x, y, w, h) source crops: top panel, then bottom. */
+  crops: number[][]
 }

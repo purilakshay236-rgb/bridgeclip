@@ -262,6 +262,8 @@ test('job validation rejects malformed options and invalid trim intervals', () =
   assert.equal(validateJobConfig(job).videoSpeed, 1)
   assert.equal(validateJobConfig(job).includeTitle, true)
   assert.equal(validateJobConfig({ ...job, includeTitle: false }).includeTitle, false)
+  assert.deepEqual(validateJobConfig({ ...job, captionColors: { caption_color: '#FF0000' } }).captionColors, { caption_color: '#FF0000' })
+  for (const captionColors of [null, { caption_color: 'red' }, { other: '#FF0000' }, { caption_box: 1 }]) assert.throws(() => validateJobConfig({ ...job, captionColors }), /caption colour/)
   assert.equal(validateJobConfig(job).clipRequest, undefined)
   assert.equal(validateJobConfig({ ...job, clipRequest: '  the pricing debate \n' }).clipRequest, 'the pricing debate')
   assert.equal(validateJobConfig({ ...job, clipRequest: '   ' }).clipRequest, undefined)
@@ -985,4 +987,29 @@ test('one unreadable Jev field falls back to its default without hiding saved ke
     assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevThreshold: '2' }), /Invalid Jev threshold/)
     assert.throws(() => store.savePublicSettings({ ...store.publicSettings(loaded), jevEnabled: 'maybe' }), /Invalid Jev/)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a finished run folder takes its video title, numbered for the same video, and its clip links follow it', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-names-'))
+  try {
+    const run = (jobId) => {
+      runHistory.createRunRecord(base, jobId, '/videos/talk.mp4')
+      const dir = path.join(base, jobId)
+      fs.writeFileSync(path.join(dir, 'job_output.json'), JSON.stringify({ job_id: jobId, clips: [{ s3_url: `file://${dir}/clip_00.mp4` }], plan_url: `${dir}/plan.json`, note: `file://${dir}x/kept` }))
+      runHistory.finishRunRecord(base, jobId, 'completed')
+      return runHistory.nameRunAfterVideo(base, jobId, 'Why: "Life" / Choice? [mO-rU2BML0A]')
+    }
+    const first = run('11111111-1111-4111-8111-111111111111')
+    const second = run('22222222-2222-4222-8222-222222222222')
+    assert.equal(path.basename(first), 'Why Life Choice')
+    assert.equal(path.basename(second), 'Why Life Choice 2')
+    const output = JSON.parse(fs.readFileSync(path.join(second, 'job_output.json'), 'utf8'))
+    assert.equal(output.clips[0].s3_url, `file://${second}/clip_00.mp4`)
+    assert.equal(output.plan_url, `${second}/plan.json`)
+    assert.equal(output.note, `file://${path.join(base, '22222222-2222-4222-8222-222222222222')}x/kept`)  // only the run's own folder moves
+    assert.equal(runHistory.readRunRecord(base, 'Why Life Choice 2').jobId, '22222222-2222-4222-8222-222222222222')
+    assert.equal(runHistory.runFolder(base, '22222222-2222-4222-8222-222222222222'), second)
+    assert.equal(runHistory.readRunRecord(base, '../Why Life Choice'), null)
+    assert.equal(runHistory.videoFolderName('...'), 'Video')
+  } finally { fs.rmSync(base, { recursive: true, force: true }) }
 })

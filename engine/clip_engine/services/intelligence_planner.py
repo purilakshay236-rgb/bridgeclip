@@ -130,6 +130,19 @@ MOMENT_HINT_RULE = (
     'then the setup_segment and payoff_segment IDs within that topic. These must refer to the numbered transcript lines. '
     'Use the anchors to make each clip include its setup and end once the idea is complete. '
     'Mark requires_visual_context when the point depends on something shown rather than described.')
+# Shorts only: longform has its own SKIPS section in its system prompt.
+TANGENT_SKIP_RULE = (
+    '\nTANGENT SKIPS: If the topic of a clip is interrupted by an off-topic detour of 8 to 30 seconds '
+    'and then resumes, either choose boundaries that avoid the detour or list it in "skip" so it is cut out. '
+    'Skip it only when the clip still makes sense without it; keep it when the setup or the payoff depends on it. '
+    'A skip starts right after a sentence ends, ends right before a sentence starts, and lies strictly inside the clip. '
+    'Skips together remove at most 40% of the clip, and (end_time - start_time) minus all skips must still meet the length rules. '
+    'Leave "skip" empty when there is no such detour. Do not list pauses or filler words; those are removed automatically.')
+# The on-screen title header: read in about a second, so it must parse at a glance.
+TITLE_QUALITY_RULES = """- Write natural, grammatically correct English (use the video's language if it is not English): correct articles, verb agreement and tense. No dropped words or broken fragments like "Why Rent Control Not Work" or "Founder Quit Because Burnout".
+- Say the clip's central message as the viewer will hear it: the point the speaker makes or the question answered, not a side detail. Never state the opposite of what the speaker argues.
+- When two people disagree, make clear whose view it is or frame the clash ("Student Challenges Economist on Rent Control"), rather than stating one side as fact.
+- Use Title Case and no trailing period."""
 # Jev review mode keeps at most this many overlapping boundary alternatives per moment.
 MAX_ALTERNATIVES_PER_MOMENT = 1
 # The user's own description of what to clip (see _build_vision_messages).
@@ -172,23 +185,26 @@ CLIP_PLAN_SCHEMA: dict[str, Any] = {
                         "items": {"type": "string"},
                         "description": "2-5 single punch words spoken in the clip, highlighted in captions.",
                     },
+                    "skip": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_time": {"type": "number", "description": "Seconds from the start of the video."},
+                                "end_time": {"type": "number", "description": "Seconds from the start of the video."},
+                            },
+                            "required": ["start_time", "end_time"],
+                            "additionalProperties": False,
+                        },
+                        "description": "Tangents or dead stretches inside the clip to cut out (may be empty).",
+                    },
                 },
-                "required": ["moment", "start_time", "end_time", "summary", "scores", "tags", "emphasis"],
+                "required": ["moment", "start_time", "end_time", "summary", "scores", "tags", "emphasis", "skip"],
                 "additionalProperties": False,
             },
         },
     },
     "required": ["insights", "clips"],
-    "additionalProperties": False,
-}
-
-_TIME_RANGE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "start_time": {"type": "number", "description": "Seconds from the start of the video."},
-        "end_time": {"type": "number", "description": "Seconds from the start of the video."},
-    },
-    "required": ["start_time", "end_time"],
     "additionalProperties": False,
 }
 
@@ -204,17 +220,12 @@ _CHAPTER_SCHEMA: dict[str, Any] = {
 
 
 def clip_plan_schema(longform: bool) -> dict[str, Any]:
-    """Planner output schema; longform clips also carry skips, chapters and a description."""
+    """Planner output schema; longform clips also carry chapters and a description."""
     if not longform:
         return CLIP_PLAN_SCHEMA
     schema = copy.deepcopy(CLIP_PLAN_SCHEMA)
     item = schema["properties"]["clips"]["items"]
     item["properties"].update({
-        "skip": {
-            "type": "array",
-            "items": _TIME_RANGE_SCHEMA,
-            "description": "Tangents or dead stretches inside the clip to cut out (may be empty).",
-        },
         "chapters": {
             "type": "array",
             "items": _CHAPTER_SCHEMA,
@@ -222,7 +233,7 @@ def clip_plan_schema(longform: bool) -> dict[str, Any]:
         },
         "description": {"type": "string", "description": "2-4 sentence upload description."},
     })
-    item["required"] = [*item["required"], "skip", "chapters", "description"]
+    item["required"] = [*item["required"], "chapters", "description"]
     return schema
 
 
@@ -597,13 +608,16 @@ class IntelligencePlannerService:
                 f'\nPreferred discovery range: {start_time_seconds if start_time_seconds is not None else "source start"}'
                 f' to {end_time_seconds if end_time_seconds is not None else "source end"} seconds. '
                 'Prioritize ideas around this range but extend either boundary to preserve meaning. '
-                'Length and clip count are preferences, never quotas. Return no clips rather than force one.'
+                + ('' if duration_ranges else 'Length is a preference, never a quota. ') +
+                'Never force an incomplete moment into a clip.'
             )
         system_prompt += SPONSOR_DISCOVERY_RULE
         if clip_request:
             system_prompt += CLIP_REQUEST_RULE
         if transcript:
             system_prompt += MOMENT_DISCOVERY_RULE if jev_enabled else MOMENT_HINT_RULE
+            if not longform:
+                system_prompt += TANGENT_SKIP_RULE
         if discovery_feedback is not None:
             system_prompt += ('\nSECOND AND FINAL DISCOVERY PASS: Search the listed underexplored intervals for different moments. '
                 'The previous candidates have already been reviewed. Do not repeat or overlap them by more than 5 seconds. '
@@ -766,6 +780,7 @@ class IntelligencePlannerService:
         """
         min_duration, max_duration = resolve_clip_duration_bounds(duration_ranges, min_duration, max_duration)
         strict_bounds_text = f"STRICTLY between {min_duration} and {max_duration} seconds"
+        selected_ranges = [DURATION_RANGES[r][2] for r in duration_ranges or [] if r in DURATION_RANGES]
 
         if getattr(self, "_jev_enabled", False):
             role = (
@@ -784,13 +799,23 @@ class IntelligencePlannerService:
 - Each title across all clips must be unique — no repeated words or patterns
 - Prefer an accurate plain title over a curiosity gap that overstates the evidence."""
             output_count = (
-                f"Return at most {clip_count} distinct moments as JSON (plus optional alternatives); "
-                "return fewer or none if no complete moments qualify:"
+                # Jev filters weak candidates, so ask for the full count: "at most" made flash stop early.
+                f"Return {clip_count} distinct moments as JSON (plus optional alternatives), searching the whole source; "
+                "Jev rejects weak ones, so propose every complete moment and return fewer only when the source has no more:"
             )
-            duration_guidance = f"Preferred length: {min_duration}–{max_duration} seconds. Completeness takes priority."
-            rules = """## ACCEPTANCE RULES
-
-- Duration targets are suggestions. Never pad, hard-truncate, or cut a thought to fit them.
+            # Lengths the user picked are required (shorter candidates are dropped); otherwise only a preference.
+            duration_guidance = (
+                f"Required length: {min_duration}–{max_duration} seconds, chosen by the user. Build each excerpt from the "
+                "surrounding discussion of the same topic to reach it; skip moments too short to fill it."
+                if selected_ranges else
+                f"Preferred length: {min_duration}–{max_duration} seconds. Completeness takes priority."
+            )
+            length_rule = (
+                f"- Each excerpt must be {min_duration}-{max_duration} seconds. Never pad with unrelated material or cut a thought to fit."
+                if selected_ranges else
+                "- Duration targets are suggestions. Never pad, hard-truncate, or cut a thought to fit them."
+            )
+            rules = "## ACCEPTANCE RULES\n\n" + length_rule + """
 - Return times in SECONDS, taken from complete transcript boundaries.
 - Include the necessary setup, qualifications, and payoff in each excerpt.
 - Prefer coherent ideas over hook scores. Return an empty clips array when necessary.
@@ -816,7 +841,6 @@ class IntelligencePlannerService:
                 f"Return exactly {clip_count} clips as JSON:"
             )
             duration_guidance = ""
-            selected_ranges = [DURATION_RANGES[r][2] for r in duration_ranges or [] if r in DURATION_RANGES]
             if selected_ranges:
                 duration_guidance = f"""
 CRITICAL DURATION REQUIREMENTS:
@@ -899,6 +923,7 @@ Prioritize clips whose opening matches one of these proven hook patterns:
 The "summary" field is the title displayed on screen. It must be 2-7 words.
 
 Rules:
+{TITLE_QUALITY_RULES}
 {title_rules}
 
 ## CAPTION EMPHASIS
@@ -987,6 +1012,7 @@ Score each episode 0-10 on these keys (be calibrated; reserve 8-10 for exception
 ## TITLES, DESCRIPTION, TAGS
 
 - "summary": a 2-7 word YouTube title that promises exactly what the episode delivers. Curiosity is good; clickbait the episode doesn't pay off is not. Match the speaker's tone. Each title unique.
+{TITLE_QUALITY_RULES}
 - "description": 2-4 plain sentences describing what the viewer will learn or see, for the upload description.
 - "tags": 3-8 topical keywords.
 - "emphasis": 2-5 single key words spoken in the episode (names, numbers, key terms).
@@ -1020,7 +1046,7 @@ is too sparse, return an empty clips array. Never invent a spoken quote or capti
 
 Return JSON with "insights" and "clips". Return at most {clip_count} clips. {length_rule}
 the timestamps of the sample frames. Prefer intervals with multiple relevant frames.
-Each clip needs start_time and end_time in seconds, a factual 2-7 word summary, tags,
+Each clip needs start_time and end_time in seconds, a factual, grammatically correct 2-7 word summary, tags,
 an empty emphasis array, and scores with hook, standalone, arc, quotability, and ending
 values from 0 to 10. Treat quotability as shareability of the visible moment, not speech.
 Do not overlap clips by more than 5 seconds."""
@@ -1138,8 +1164,8 @@ Do not overlap clips by more than 5 seconds."""
             ), "Return your response as JSON."
         elif transcript and getattr(self, "_jev_enabled", False):
             instruction, reply = (
-                f"\nBased on the {source} above, identify up to {clip_count} coherent, self-contained segments. "
-                "Return fewer or none rather than force a clip."
+                f"\nBased on the {source} above, identify {clip_count} coherent, self-contained segments. "
+                "Return fewer only when no more complete moments exist."
             ), "Return JSON."
         elif transcript:
             instruction, reply = (
@@ -1516,10 +1542,10 @@ Do not overlap clips by more than 5 seconds."""
                 ),
                 moment=self._moment_hint(clip, transcript),
             )
+            segment.skip_ranges_ms = self._clean_skips(
+                clip.get("skip"), start_time_ms, end_time_ms, min_duration * 1000, transcript,
+            )
             if getattr(self, "_current_longform", False):
-                segment.skip_ranges_ms = self._clean_skips(
-                    clip.get("skip"), start_time_ms, end_time_ms, min_duration * 1000, transcript,
-                )
                 segment.chapters = self._clean_chapters(
                     clip.get("chapters"), start_time_ms, end_time_ms, segment.skip_ranges_ms,
                     segment.summary,
@@ -1547,6 +1573,13 @@ Do not overlap clips by more than 5 seconds."""
         audit = getattr(self, 'audit', None)
         if isinstance(audit, dict):
             audit.setdefault('discarded', []).append({'start_time': start, 'end_time': end, 'reason': reason})
+
+    def _ignore_anchors(self, start: Any, end: Any, reason: str) -> None:
+        """Record a Jev candidate kept without its anchors."""
+        logger.warning(f"Ignoring anchors on planner candidate {start}-{end}: {reason}")
+        audit = getattr(self, 'audit', None)
+        if isinstance(audit, dict):
+            audit.setdefault('anchors_ignored', []).append({'start_time': start, 'end_time': end, 'reason': reason})
 
     def _editorial_candidates(self, clips_data: list) -> list[ClipPlanSegment]:
         """Jev review candidates: complete sentences, anchors as constraints, no duration cuts."""
@@ -1588,16 +1621,31 @@ Do not overlap clips by more than 5 seconds."""
                     continue
             moment = None
             if transcript and 'moment' in clip:
+                # Bad anchors drop only the anchors, not the clip: Jev still reviews its
+                # opening, ending and flow. Dropping them lost most flash candidates.
                 try:
                     moment = parse_moment(clip['moment'], transcript)
                 except ValueError as e:
-                    self._discard(start, end, f'moment anchors: {e}')
-                    continue
-                # Anchors construct the full moment before the first review.
-                start_ms = min(start_ms, moment['setup']['start_ms'])
-                end_ms = max(end_ms, moment['payoff']['end_ms'])
-                if not (0 <= start_ms < end_ms <= source_end and moment['topic_interval'][0] <= start_ms < end_ms <= moment['topic_interval'][1]):
-                    self._discard(start, end, 'excerpt extends outside its moment topic')
+                    self._ignore_anchors(start, end, f'moment anchors: {e}')
+                if moment:
+                    # Anchors construct the full moment before the first review.
+                    anchored = (min(start_ms, moment['setup']['start_ms']), max(end_ms, moment['payoff']['end_ms']))
+                    if 0 <= anchored[0] < anchored[1] <= source_end and moment['topic_interval'][0] <= anchored[0] < anchored[1] <= moment['topic_interval'][1]:
+                        start_ms, end_ms = anchored
+                    else:
+                        self._ignore_anchors(start, end, 'excerpt extends outside its moment topic')
+                        moment = None
+            min_ms = (getattr(self, '_current_min_duration', 0) or 0) * 1000
+            if getattr(self, '_current_duration_ranges', None) and transcript and end_ms - start_ms < min_ms:
+                # User-chosen lengths are required: widen within the same topic (whole transcript lines), never into another.
+                low, high = moment['topic_interval'] if moment else (start_ms, end_ms)
+                ends = [t.end_time_ms for t in transcript if end_ms < t.end_time_ms <= high]
+                end_ms = next((e for e in ends if e - start_ms >= min_ms), max(ends, default=end_ms))
+                if end_ms - start_ms < min_ms:
+                    starts = [t.start_time_ms for t in reversed(transcript) if low <= t.start_time_ms < start_ms]
+                    start_ms = next((s for s in starts if end_ms - s >= min_ms), min(starts, default=start_ms))
+                if end_ms - start_ms < min_ms:
+                    self._discard(start, end, f'shorter than the chosen {min_ms // 1000:g}s minimum, even across its whole topic')
                     continue
             # Keep model-generated titles bounded and on one line.
             summary = clip.get("summary")
@@ -1605,8 +1653,8 @@ Do not overlap clips by more than 5 seconds."""
             segment = ClipPlanSegment(start_ms, end_ms, self._score_clip(clip), moment=moment,
                 summary=summary or None, tags=clip.get('tags', []),
                 emphasis_words=[w for w in clip.get('emphasis', []) if isinstance(w, str)][:5] if transcript else [])
+            segment.skip_ranges_ms = self._clean_skips(clip.get('skip'), start_ms, end_ms, 0, transcript)
             if getattr(self, '_current_longform', False):
-                segment.skip_ranges_ms = self._clean_skips(clip.get('skip'), start_ms, end_ms, 0, transcript)
                 segment.chapters = self._clean_chapters(clip.get('chapters'), start_ms, end_ms, segment.skip_ranges_ms, segment.summary)
                 description = clip.get('description')
                 if isinstance(description, str) and description.strip():

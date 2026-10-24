@@ -22,3 +22,9 @@ engine/.venv/
 
 __pycache__/
 *.py[cod]
+
+# macOS resource-fork sidecars (exFAT drive)
+._*
+graphify-out/
+engine-bin
+engine-venv

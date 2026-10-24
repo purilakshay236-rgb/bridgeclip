@@ -28,10 +28,11 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
   if (v.clippingMode === 'advanced' && (!isModelId(v.plannerModel) || !isModelId(v.transcriptionModel))) throw new Error('Choose both models in Advanced mode')
   if (v.clippingMode !== 'advanced' && (v.plannerModel !== undefined || v.transcriptionModel !== undefined)) throw new Error('Custom models require Advanced mode')
   if (v.maxClips !== null && (!Number.isInteger(v.maxClips) || v.maxClips < 1 || v.maxClips > 100)) throw new Error('Clip count must be between 1 and 100')
-  for (const [key, allowed] of Object.entries({ aspectRatio: ['9:16', '16:9'], layoutStyle: ['auto', 'fill', 'fit'], pacing: ['tight', 'natural'] })) {
+  for (const [key, allowed] of Object.entries({ aspectRatio: ['9:16', '16:9'], layoutStyle: ['auto', 'fill', 'fit', 'split', 'debate'], pacing: ['tight', 'natural'] })) {
     if (!allowed.includes(v[key as keyof ClipJobConfig] as string)) throw new Error(`Invalid ${key}`)
   }
   if (typeof v.captionPreset !== 'string' || !/^[a-z0-9_-]{1,64}$/i.test(v.captionPreset)) throw new Error('Invalid caption preset')
+  if (v.captionColors !== undefined && (!v.captionColors || typeof v.captionColors !== 'object' || Object.entries(v.captionColors).some(([k, c]) => !['caption_color', 'caption_highlight', 'caption_box'].includes(k) || typeof c !== 'string' || !/^#[0-9A-F]{6}$/i.test(c)))) throw new Error('Invalid caption colour')
   if (v.durationRanges !== null && (!Array.isArray(v.durationRanges) || v.durationRanges.length > DURATION_IDS.length || v.durationRanges.some((item) => !DURATION_IDS.includes(item)))) throw new Error('Invalid clip duration')
   for (const time of [v.startTimeSeconds, v.endTimeSeconds]) {
     if (time !== null && (typeof time !== 'number' || !Number.isFinite(time) || time < 0)) throw new Error('Invalid trim time')
@@ -48,6 +49,6 @@ export function validateJobConfig(value: unknown): ClipJobConfig {
 
 const JOB_REQUEST_FIELDS: readonly (keyof ClipJobRequest)[] = [
   'workflow', 'videoUrl', 'clippingMode', 'plannerModel', 'transcriptionModel', 'clipRequest', 'maxClips', 'autoClipCount',
-  'durationRanges', 'aspectRatio', 'layoutStyle', 'layoutVision', 'pacing', 'videoSpeed', 'includeCaptions', 'captionPreset',
+  'durationRanges', 'aspectRatio', 'layoutStyle', 'layoutVision', 'pacing', 'videoSpeed', 'includeCaptions', 'captionPreset', 'captionColors',
   'includeTitle', 'startTimeSeconds', 'endTimeSeconds', 'bannerPlatform', 'bannerChannelUrl'
 ]

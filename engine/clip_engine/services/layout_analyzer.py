@@ -252,6 +252,10 @@ class ShotLayout:
     manual_from_crops: list[tuple[float, float, float, float]] = field(default_factory=list)
     manual_transition_start_ms: int = 0
     manual_transition_ms: int = 0
+    # Two manual crops: the top panel's share of the output height (0 = equal halves).
+    manual_top_share: float = 0
+    # Per manual crop: flipped left to right.
+    manual_mirror: list[bool] = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -1118,7 +1122,7 @@ def apply_style(shot: ShotLayout, style: str, src_w: int, src_h: int) -> ShotLay
     if shot.content_box is not None or shot.crop_bounds is not None:
         # Insets keep their own picture: fill crops inside the inset, fit shows
         # the whole inset. Automatic framing keeps the detected choice.
-        if style == LayoutStyle.FILL and shot.content_box is not None:
+        if style in (LayoutStyle.FILL, LayoutStyle.DEBATE) and shot.content_box is not None:
             bounds = shot.content_box
             focus = shot.people[0] if shot.people else bounds
             shot.layout, shot.source = LayoutType.TALKING_HEAD, "style"
@@ -1131,7 +1135,7 @@ def apply_style(shot: ShotLayout, style: str, src_w: int, src_h: int) -> ShotLay
     if style == LayoutStyle.FIT:
         shot.layout = LayoutType.SCREEN
         shot.source = "style"
-    elif style == LayoutStyle.FILL:
+    elif style in (LayoutStyle.FILL, LayoutStyle.DEBATE):  # Debate frames shots without two people as Full frame
         if shot.layout in (LayoutType.TWO_SHOT, LayoutType.SCREEN_CAM, LayoutType.SCREEN):
             focus = shot.people[0] if shot.people else None
             if shot.layout == LayoutType.SCREEN_CAM and shot.cam_face:

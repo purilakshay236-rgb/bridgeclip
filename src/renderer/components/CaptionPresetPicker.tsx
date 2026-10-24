@@ -442,15 +442,37 @@ function CaptionMotionPreview({ preset, disabled }: { preset: CaptionPreset; dis
   )
 }
 
+const CAPTION_COLORS = ['#FFFFFF', '#000000', '#FFE234', '#FFD60A', '#FF8A00', '#FF3B30', '#FF2D95', '#B44CFF', '#7C5CFF', '#3DA5FF', '#00E5FF', '#3DFF8B']
+/** One caption colour: preset swatches plus a custom colour wheel. Undefined means the preset's colour. */
+export function CaptionColor({ label, value, fallback, onChange }: { label: string; value?: string; fallback: string; onChange: (color: string | undefined) => void }): React.JSX.Element {
+  const current = (value ?? fallback).toUpperCase()
+  return <div role="group" aria-label={`${label} colour`}>
+    <div className="flex items-center justify-between text-xs"><span>{label}</span>{value && <button type="button" className="text-2xs underline text-ink-subtle" onClick={() => onChange(undefined)}>Preset colour</button>}</div>
+    <div className="editor-swatches">{CAPTION_COLORS.map((color) => <button type="button" key={color} aria-label={`${label} ${color}`} aria-pressed={current === color} className={cn(current === color && 'selected')} style={{ background: color }} onClick={() => onChange(color)} />)}
+      <input type="color" aria-label={`Custom ${label.toLowerCase()} colour`} title="Pick any colour" value={current.toLowerCase()} onChange={(e) => onChange(e.target.value.toUpperCase())} /></div>
+  </div>
+}
+
+export type CaptionColorKey = 'caption_color' | 'caption_highlight' | 'caption_box'
+/** Text, highlighted word and (pill presets only) word box colours for one preset. */
+export function CaptionColors({ preset, value, onChange }: { preset: string; value: Partial<Record<CaptionColorKey, string>>; onChange: (key: CaptionColorKey, color: string | undefined) => void }): React.JSX.Element {
+  const p = captionPreviewPreset(preset)
+  const rows: [CaptionColorKey, string, string][] = [['caption_color', 'Text', p.primary], ['caption_highlight', 'Highlighted word', p.highlight], ...(p.pill ? [['caption_box', 'Word box', p.pill] as [CaptionColorKey, string, string]] : [])]
+  return <div className="space-y-3">{rows.map(([key, label, fallback]) => <CaptionColor key={key} label={label} value={value[key]} fallback={fallback} onChange={(color) => onChange(key, color)} />)}</div>
+}
+
 interface CaptionPresetPickerProps {
   value: string
   onChange: (preset: string) => void
   disabled?: boolean
   showPreview?: boolean
+  /** Colour overrides shown in the preview. */
+  colors?: Partial<Record<CaptionColorKey, string>>
 }
 
-export function CaptionPresetPicker({ value, onChange, disabled, showPreview = false }: CaptionPresetPickerProps): React.JSX.Element {
-  const current = PRESETS.find((preset) => preset.id === value) ?? PRESETS[0]
+export function CaptionPresetPicker({ value, onChange, disabled, showPreview = false, colors = {} }: CaptionPresetPickerProps): React.JSX.Element {
+  const base = PRESETS.find((preset) => preset.id === value) ?? PRESETS[0]
+  const current = { ...base, primary: colors.caption_color ?? base.primary, highlight: colors.caption_highlight ?? base.highlight, pill: base.pill && (colors.caption_box ?? base.pill) }
   return (
     <div>
       {showPreview && <CaptionMotionPreview key={current.id} preset={current} disabled={disabled} />}

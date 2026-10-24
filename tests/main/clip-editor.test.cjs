@@ -90,12 +90,66 @@ test('smooth movement preserves legacy projects and eases crops continuously thr
   assert.equal(schema.parseCandidateEdit(c, 12000).scenes[2].transition_ms, 1000)
 })
 
+test('swapped panels reverse Debate heights, block movement across a swap, and mirror flags are validated', () => {
+  const c = clone().candidates[0]
+  c.scenes = [
+    { at_ms: 0, layout: 'debate', crops: [[0, 0, 1, .9], [.4, 0, .3, .9]] },
+    { at_ms: 2000, layout: 'debate', crops: [[.4, 0, .3, .9], [0, 0, 1, .9]], swapped: true, mirror: [true, false], transition_ms: 600 }
+  ]
+  assert.deepEqual(schema.panelShares('debate', true), [.65, .35])
+  assert.deepEqual(schema.panelShares('debate'), [.35, .65])
+  assert.throws(() => schema.parseCandidateEdit(c, 12000))  // no movement into a swapped layout
+  c.scenes = schema.normalizeSceneTransitions(c.scenes)
+  const parsed = schema.parseCandidateEdit(c, 12000).scenes[1]
+  assert.deepEqual([parsed.swapped, parsed.mirror, parsed.transition_ms], [true, [true, false], undefined])
+  for (const bad of [{ swapped: 'yes' }, { mirror: [true] }, { mirror: [1, 0] }, { layout: 'fill', crops: [[0, 0, .3, 1]], swapped: true }]) {
+    assert.throws(() => schema.parseCandidateEdit({ ...c, scenes: [c.scenes[0], { ...c.scenes[1], ...bad }] }, 12000))
+  }
+  // All-false mirrors and unswapped panels are not stored.
+  const plain = schema.parseCandidateEdit({ ...c, scenes: [{ ...c.scenes[0], mirror: [false, false], swapped: false }] }, 12000).scenes[0]
+  assert.deepEqual(Object.keys(plain).sort(), ['at_ms', 'crops', 'layout'])
+})
+
 test('timeline edges extend to source limits without crossing other cuts or collapsing a cut', () => {
   const cuts = [[10000, 15000], [18000, 20000]]
   assert.deepEqual(schema.trimRange(cuts, 0, 0, -500, 60000), [[0, 15000], [18000, 20000]])
   assert.deepEqual(schema.trimRange(cuts, 1, 1, 70000, 60000), [[10000, 15000], [18000, 60000]])
   assert.deepEqual(schema.trimRange(cuts, 0, 1, 19000, 60000), [[10000, 18000], [18000, 20000]])
   assert.deepEqual(schema.trimRange(cuts, 1, 0, 0, 60000), [[10000, 15000], [15000, 20000]])
+  // Q / W trim only the cut under the playhead, and never collapse it.
+  assert.deepEqual(schema.deleteToPlayhead(cuts, 12000, 0, 60000), [[12000, 15000], [18000, 20000]])
+  assert.deepEqual(schema.deleteToPlayhead(cuts, 19000, 1, 60000), [[10000, 15000], [18000, 19000]])
+  assert.deepEqual(schema.deleteToPlayhead(cuts, 14990, 0, 60000), [[14900, 15000], [18000, 20000]])
+  assert.equal(schema.deleteToPlayhead(cuts, 16000, 0, 60000), null)
+  // Play cuts only: free before the clip, skip the gap, stop at the end unless started past it.
+  assert.equal(schema.cutPlayback(cuts, 5000, 5000), null)
+  assert.equal(schema.cutPlayback(cuts, 16000, 5000), 18000)
+  assert.equal(schema.cutPlayback(cuts, 20000, 5000), 'stop')
+  assert.equal(schema.cutPlayback(cuts, 25000, 22000), null)
+  assert.equal(schema.cutPlayback(cuts, 20100, 19970), null, 'play again from where it stopped continues past the end')
+  assert.equal(schema.cutPlayback(cuts, 12000, 5000, [[11000, 13000]]), 13000)
+  // Tight preview skips pauses over 700 ms in every framing; Natural skips none.
+  const c0 = { ranges: [[0, 10000]], scenes: [{ at_ms: 0, layout: 'fill', crops: [[0, 0, 1, 1]] }] }
+  const rows = [{ start_ms: 500, end_ms: 2000, text: 'a' }, { start_ms: 3000, end_ms: 4000, text: 'b' }, { start_ms: 4500, end_ms: 9800, text: 'c' }]
+  assert.deepEqual(schema.deadAirSkips({ transcript: rows }, c0), [[0, 380], [2130, 2870]])
+  assert.deepEqual(schema.deadAirSkips({ transcript: rows }, { ...c0, scenes: [{ ...c0.scenes[0], layout: 'fit' }] }), [[0, 380], [2130, 2870]])
+  assert.deepEqual(schema.deadAirSkips({ transcript: rows, pacing: 'natural' }, c0), [])
+  // Live preview captions: groups of maxWords, active word by position, edits and caption-free sections respected.
+  const line = { transcript: [{ start_ms: 0, end_ms: 6000, text: 'one two three four five six' }] }
+  const cc = { ...c0, caption_edits: [], caption_suppression_ranges: [] }
+  assert.deepEqual(schema.liveCaption(line, cc, 100, 3), { words: ['one', 'two', 'three'], active: 0 })
+  assert.deepEqual(schema.liveCaption(line, cc, 5900, 3), { words: ['four', 'five', 'six'], active: 2 })
+  assert.deepEqual(schema.liveCaption(line, { ...cc, caption_edits: [{ segment: 0, text: 'fixed words' }] }, 100, 3), { words: ['fixed', 'words'], active: 0 })
+  assert.equal(schema.liveCaption(line, { ...cc, caption_suppression_ranges: [[0, 1000]] }, 500, 3), null)
+  assert.equal(schema.liveCaption(line, { ...cc, ranges: [[2000, 3000]] }, 500, 3), null)
+  // With real word times, fast words and pauses follow the speech, and groups break at punctuation like the export.
+  const timed = { transcript: [{ start_ms: 0, end_ms: 6000, text: 'Yes. one two three four' }] }
+  const times = [[['Yes.', 0, 300], ['one', 300, 400], ['two', 400, 500], ['three', 500, 600], ['four', 5000, 5500]]]
+  assert.deepEqual(schema.liveCaption(timed, cc, 100, 3, times), { words: ['Yes.'], active: 0 })
+  assert.deepEqual(schema.liveCaption(timed, cc, 550, 3, times), { words: ['one', 'two', 'three'], active: 2 })
+  assert.deepEqual(schema.liveCaption(timed, cc, 4000, 3, times), { words: ['one', 'two', 'three'], active: 2 }, 'A pause holds the last word')
+  assert.deepEqual(schema.liveCaption(timed, cc, 5100, 3, times), { words: ['four'], active: 0 })
+  assert.deepEqual(schema.liveCaption(timed, { ...cc, caption_edits: [{ segment: 0, text: 'Yes. 1 2 3 4' }] }, 5100, 3, times), { words: ['4'], active: 0 }, 'Same-count corrections keep word times')
   assert.deepEqual(schema.trimRange(cuts, 0, 1, 0, 60000), [[10000, 10100], [18000, 20000]])
   assert.deepEqual(cuts, [[10000, 15000], [18000, 20000]])
 })
@@ -121,7 +175,7 @@ test('layout start times move between neighbours without changing crops, motion 
   assert.deepEqual(scenes, before)
   const approved = { ...c, status: 'ready', scenes }
   const moved = schema.refineEdit(approved, { scenes: schema.retimeScene(scenes, 1, 4000, 12000) })
-  assert.equal(moved.status, 'refining')
+  assert.equal(moved.status, 'ready')
   assert.notEqual(schema.editSignature(moved), schema.editSignature(approved))
 })
 
@@ -183,13 +237,13 @@ test('legacy candidates start refining; caption corrections are bounded and refe
   ]) assert.throws(() => schema.parseCandidateEdit({ ...c, ...patch }, 12000, 4))
 })
 
-test('content changes return approved candidates to refining; status changes preserve source review', () => {
+test('content changes keep clips marked for export but return baked clips to refining; status changes preserve source review', () => {
   const c = schema.parseEditorProject(clone()).candidates[0]
   const patches = [{ title: 'Changed title' }, { ranges: [[1000, 4000]] }, { scenes: [c.scenes[0]] },
     { captions: false }, { caption_preset: 'minimal' }, { video_speed: 1.5 }, { caption_edits: [{ segment: 1, text: 'Correction' }] }]
   for (const status of ['ready', 'baked']) for (const patch of patches) {
     const next = schema.refineEdit({ ...c, status }, patch)
-    assert.equal(next.status, 'refining')
+    assert.equal(next.status, status === 'baked' ? 'refining' : 'ready')
     assert.deepEqual(next.review, c.review)
   }
   assert.equal(schema.refineEdit({ ...c, status: 'ready' }, { title: c.title }).status, 'ready')
@@ -315,7 +369,7 @@ test('caption suppression validates source intervals and changes render state wi
   const c = schema.parseEditorProject(clone()).candidates[0]
   assert.deepEqual(c.caption_suppression_ranges, [])
   const ranges = [[0, 2000], [4000, 7000], [11000, 12000]]
-  const next = schema.refineEdit({ ...c, status: 'ready' }, { caption_suppression_ranges: ranges })
+  const next = schema.refineEdit({ ...c, status: 'baked' }, { caption_suppression_ranges: ranges })
   assert.equal(next.status, 'refining')
   assert.equal(schema.editSignature(next), schema.editSignature(c))
   assert.deepEqual(schema.parseCandidateEdit(next, 12000).caption_suppression_ranges, ranges)
@@ -350,7 +404,8 @@ test('older main-process sessions and empty caption suppression have the same re
   assert.deepEqual(schema.candidateEdit(legacy).caption_suppression_ranges, [])
   assert.equal(schema.renderEditKey(legacy), schema.renderEditKey(c))
   assert.equal(schema.refineEdit({ ...legacy, status: 'ready' }, { caption_suppression_ranges: [] }).status, 'ready')
-  assert.equal(schema.refineEdit({ ...legacy, status: 'ready' }, { caption_suppression_ranges: [[1000, 2000]] }).status, 'refining')
+  assert.equal(schema.refineEdit({ ...legacy, status: 'baked' }, { caption_suppression_ranges: [[1000, 2000]] }).status, 'refining')
+  assert.equal(schema.refineEdit({ ...legacy, status: 'ready' }, { caption_suppression_ranges: [[1000, 2000]] }).status, 'ready')
 })
 
 
@@ -787,4 +842,24 @@ test('editor media can be freed only when nothing is left to finish, and the pro
     await assert.rejects(f.main.saveEditor(f.run, 1, freed.project.candidates), /read-only/)
     await assert.rejects(f.main.runEditor(f.run, 1, 'candidate-2', 'export'), /read-only/)
   } finally { f.cleanup() }
+})
+
+test('clip style copies caption and header look only', () => {
+  const [a, b] = clone().candidates
+  const styled = { ...a, captions: false, caption_preset: 'bold', caption_y: .3, caption_scale: 1.5, title_card: true, title_y: .1, title_scale: .75, caption_color: '#FF0000' }
+  const next = schema.refineEdit(b, schema.clipStyle(styled))
+  for (const k of ['captions', 'caption_preset', 'caption_y', 'caption_scale', 'title_card', 'title_y', 'title_scale', 'caption_color']) assert.deepEqual(next[k], styled[k])
+  assert.equal(next.caption_highlight, undefined)
+  assert.deepEqual([next.id, next.title, next.ranges, next.scenes], [b.id, b.title, b.ranges, b.scenes])
+})
+
+test('debate layout keeps both speakers in a short top panel above a tall close-up', () => {
+  assert.deepEqual(schema.panelShares('debate'), [.35, .65])
+  assert.deepEqual(schema.panelShares('split'), [.5, .5])
+  const p = clone()
+  p.candidates[0].scenes = [{ at_ms: 0, layout: 'debate', crops: [[0, 0, .9, 1], [.6, .1, .25, .5]] },
+    { at_ms: 9000, layout: 'debate', crops: [[0, 0, .9, 1], [.05, .1, .25, .5]], transition_ms: 600 }]
+  assert.equal(schema.parseEditorProject(p).candidates[0].scenes[1].layout, 'debate')
+  p.candidates[0].scenes[0].crops.pop()
+  assert.throws(() => schema.parseEditorProject(p))
 })

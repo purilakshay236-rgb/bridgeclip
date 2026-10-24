@@ -26,6 +26,7 @@ fade
 format
 fps
 gblur
+hflip
 hstack
 loudnorm
 lutyuv

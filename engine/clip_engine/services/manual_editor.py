@@ -12,11 +12,12 @@ from dataclasses import replace
 from pathlib import Path
 from clip_engine.error_policy import NoClipCandidatesError
 
+from clip_engine.services.clip_editor import compute_keep_intervals, reaction_intervals, window_words
 from clip_engine.services.coherence_review import CLIP_QUESTIONS, CUT_QUESTIONS, CoherenceReviewer, check_threshold, dialogue
 from clip_engine.services.jev_service import JevService
 from clip_engine.services.layout_analyzer import ClipLayoutPlan, ShotLayout, LayoutType
-from clip_engine.services.layout_renderer import shot_views
-from clip_engine.services.rendering_service import RenderRequest, RenderingService
+from clip_engine.services.layout_renderer import DEBATE_TOP_RATIO, shot_views
+from clip_engine.services.rendering_service import TITLE_FONTS, RenderRequest, RenderingService
 from clip_engine.services.transcription_service import TranscriptSegment, TranscriptWord
 from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOUT_SECONDS, run_media, validate_video_dimensions
 
@@ -165,6 +166,17 @@ def default_crop(w, h, aspect, cx=.5):
     return [max(0, min(1 - cw, cx - cw / 2)), (1 - ch) / 2, cw, ch]
 
 
+def view_crops(views, w, h, aspect):
+    """Normalized editable crops, one per panel, from shot_views' source rectangles."""
+    normalized = []
+    for ((x, y, cw, ch), _) in views[:2]:
+        target = aspect * len(views)
+        zoom = max(1, min(4, min(1, h * target / w) / max(.01, cw / w)))
+        base_w, base_h = min(1, h * target / w) / zoom, min(1, w / target / h) / zoom
+        normalized.append([max(0, min(1 - base_w, (x + cw / 2) / w - base_w / 2)), max(0, min(1 - base_h, (y + ch / 2) / h - base_h / 2)), base_w, base_h])
+    return normalized
+
+
 async def prepare_project(request, segments, transcript, download, renderer, reviewer, output_dir, progress):
     if not segments:
         raise NoClipCandidatesError()
@@ -172,7 +184,7 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
     duration = round(download.metadata.duration_seconds * 1000)
     aspect = 9 / 16 if request.aspect_ratio == '9:16' else 16 / 9
     project = {'version': 1, 'revision': 0, 'title': utf16_prefix(download.metadata.title or '', 1024), 'width': w, 'height': h,
-        'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'candidates': [],
+        'duration_ms': duration, 'aspect_ratio': request.aspect_ratio, 'pacing': request.pacing, 'candidates': [],
         'transcript': [{'start_ms': max(0, min(duration, s.start_time_ms)), 'end_ms': max(0, min(duration, s.end_time_ms)),
                         'text': utf16_prefix(s.text, 20000)} for s in transcript]}
     loop = asyncio.get_running_loop()
@@ -206,18 +218,28 @@ async def prepare_project(request, segments, transcript, download, renderer, rev
             try:
                 plan = await renderer.layout_analyzer.analyze(download.video_path, a, b - a, w, h, request.layout_style,
                     progress=report_layout)
+                # The same speaker following as automatic renders and Follow speaker: each turn's crop
+                # glides to keep the speaker's face centred instead of freezing where the turn began.
+                from clip_engine.services.speaker_follow import speaker_scenes
+                followed = await asyncio.to_thread(speaker_scenes, plan, download.video_path, a, transcript,
+                                                   'debate' if request.layout_style == 'debate' else 'fill') \
+                    if request.layout_style in ('auto', 'fill', 'debate') else [(shot, None) for shot in plan.shots]
                 scenes = []
-                for j, shot in enumerate(plan.shots[:60]):
+                for shot, following in followed:
+                    if following:
+                        scenes.extend(following)
+                        continue
                     views = shot_views(shot, (shot.start_ms + shot.end_ms) // 2, w, h, 1080, 1920)
-                    normalized = []
-                    for ((x, y, cw, ch), _) in views[:2]:
-                        target = aspect * len(views)
-                        zoom = max(1, min(4, min(1, h * target / w) / max(.01, cw / w)))
-                        base_w, base_h = min(1, h * target / w) / zoom, min(1, w / target / h) / zoom
-                        normalized.append([max(0, min(1 - base_w, (x + cw / 2) / w - base_w / 2)), max(0, min(1 - base_h, (y + ch / 2) / h - base_h / 2)), base_w, base_h])
-                    scenes.append({'at_ms': 0 if j == 0 else a + shot.start_ms,
+                    scenes.append({'at_ms': a + shot.start_ms,
                         'layout': 'split' if len(views) == 2 else 'fit' if shot.layout == LayoutType.SCREEN else 'fill',
-                        'crops': normalized})
+                        'crops': view_crops(views, w, h, aspect)})
+                # Keep every layout change within the editor's limit: the smallest glides inside a turn go first.
+                while len(scenes) > 60:
+                    moving = [k for k, scene in enumerate(scenes) if scene.get('transition_ms')]
+                    del scenes[min(moving, key=lambda k: abs(scenes[k]['crops'][-1][0] - scenes[k - 1]['crops'][-1][0]))
+                               if moving else -1]
+                if scenes:
+                    scenes[0]['at_ms'] = 0
                 if not scenes:
                     scenes = [{'at_ms': 0, 'layout': 'fill', 'crops': [default_crop(w, h, aspect)]}]
             except asyncio.CancelledError:
@@ -325,15 +347,21 @@ def validate_candidate(c, duration, transcript_count=100000):
         raise ValueError('Invalid layouts')
     previous = -1
     for i, s in enumerate(c['scenes']):
-        if not number(s['at_ms'], previous + .001, duration) or s['layout'] not in ('fill', 'split', 'fit'):
+        if not number(s['at_ms'], previous + .001, duration) or s['layout'] not in ('fill', 'split', 'fit', 'debate'):
             raise ValueError('Invalid layout')
         previous = s['at_ms']
         transition = s.get('transition_ms', 0)
         if not number(transition, 0, 5000) or (transition and (transition < 100 or transition != int(transition)
-                or i == 0 or s['layout'] == 'fit' or c['scenes'][i - 1]['layout'] != s['layout'])):
+                or i == 0 or s['layout'] == 'fit' or c['scenes'][i - 1]['layout'] != s['layout']
+                or bool(c['scenes'][i - 1].get('swapped')) != bool(s.get('swapped')))):
             raise ValueError('Invalid layout movement')
-        if len(s['crops']) != (2 if s['layout'] == 'split' else 1):
+        if len(s['crops']) != (2 if s['layout'] in ('split', 'debate') else 1):
             raise ValueError('Invalid crops')
+        mirror = s.get('mirror', [])
+        if (type(s.get('swapped', False)) is not bool or (s.get('swapped') and len(s['crops']) != 2)
+                or not isinstance(mirror, list) or (mirror and len(mirror) != len(s['crops']))
+                or any(type(m) is not bool for m in mirror)):
+            raise ValueError('Invalid panel options')
         for x, y, w, h in s['crops']:
             if not all(number(n, 0, 1) for n in (x, y, w, h)) or min(w, h) < .01 or x + w > 1.000001 or y + h > 1.000001:
                 raise ValueError('Invalid crop')
@@ -341,6 +369,17 @@ def validate_candidate(c, duration, transcript_count=100000):
         raise ValueError('Invalid export settings')
     if c.get('caption_y') is not None and not number(c['caption_y'], .1, .9):
         raise ValueError('Invalid caption position')
+    if not number(c.get('caption_scale', 1), .5, 2):
+        raise ValueError('Invalid caption size')
+    if type(c.get('title_card', False)) is not bool:
+        raise ValueError('Invalid title card')
+    if c.get('title_y') is not None and not number(c['title_y'], .05, .95) or not number(c.get('title_scale', 1), .5, 2):
+        raise ValueError('Invalid title card')
+    if not isinstance(c.get('title_font', 'montserrat'), str) or c.get('title_font', 'montserrat') not in TITLE_FONTS:
+        raise ValueError('Invalid title font')
+    for key in ('caption_color', 'caption_highlight', 'caption_box'):
+        if key in c and not (isinstance(c[key], str) and re.fullmatch(r'#[0-9A-Fa-f]{6}', c[key])):
+            raise ValueError('Invalid caption colour')
     if c.get('status', 'refining') not in ('refining', 'ready', 'baked', 'discarded'):
         raise ValueError('Invalid clip status')
     suppressed = c.get('caption_suppression_ranges', [])
@@ -419,16 +458,21 @@ def manual_plan(project, c):
         start, end = max(a, scene['at_ms']), min(b, c['scenes'][i + 1]['at_ms'] if i + 1 < len(c['scenes']) else b)
         if start >= end:
             continue
-        layout = {'split': LayoutType.TWO_SHOT, 'fit': LayoutType.SCREEN, 'fill': LayoutType.TALKING_HEAD}[scene['layout']]
+        layout = {'split': LayoutType.TWO_SHOT, 'debate': LayoutType.TWO_SHOT, 'fit': LayoutType.SCREEN,
+                  'fill': LayoutType.TALKING_HEAD}[scene['layout']]
         crops = [] if scene['layout'] == 'fit' else scene['crops']
+        share = DEBATE_TOP_RATIO if scene['layout'] == 'debate' else 0
+        if share and scene.get('swapped'):
+            share = 1 - share
+        mirror = [] if scene['layout'] == 'fit' else scene.get('mirror', [])
         duration = scene.get('transition_ms', 0)
         motion_end = min(end, scene['at_ms'] + duration)
         if duration and start < motion_end:
-            shots.append(ShotLayout(start - a, motion_end - a, layout, source='manual', manual_crops=crops,
-                manual_from_crops=origin, manual_transition_start_ms=scene['at_ms'] - a, manual_transition_ms=duration))
+            shots.append(ShotLayout(start - a, motion_end - a, layout, source='manual', manual_crops=crops, manual_top_share=share,
+                manual_mirror=mirror, manual_from_crops=origin, manual_transition_start_ms=scene['at_ms'] - a, manual_transition_ms=duration))
             start = motion_end
         if start < end:
-            shots.append(ShotLayout(start - a, end - a, layout, source='manual', manual_crops=crops))
+            shots.append(ShotLayout(start - a, end - a, layout, source='manual', manual_crops=crops, manual_top_share=share, manual_mirror=mirror))
     return ClipLayoutPlan(shots, project['width'], project['height'])
 
 
@@ -494,6 +538,38 @@ async def run_editor(config, progress=None):
             if preview is not None:
                 preview.unlink(missing_ok=True)
         return
+    if config['action'] == 'follow-speaker':
+        from clip_engine.services.editor_speaker import follow_all
+        # One press frames every clip; scanned frames are kept so a second press only scans new stretches.
+        cache_path = run / 'speaker-frames.json'
+        try:
+            cache = read_json(run, 'speaker-frames.json')
+            if cache['source_id'] != project.get('source_id'):
+                raise ValueError('Speaker scan is for another source')
+        except Exception:
+            cache = {'frames': [], 'scanned': []}
+        candidates = [x for x in project['candidates'] if x is c or x.get('status') != 'discarded']
+        for x in candidates:
+            with failure_code('invalid_edit'):
+                validate_candidate(x, project['duration_ms'], len(project['transcript']))
+        try:
+            words = [(w['start_time_ms'], w['end_time_ms']) for s in read_json(run, 'transcript.json')['segments'] for w in s.get('words', [])]
+        except Exception:
+            words = []  # pieces fall back to whole transcript lines
+        with failure_code('source_incompatible'):
+            found, frames, scanned = await asyncio.to_thread(follow_all, source, project, candidates, cache['frames'], cache['scanned'],
+                                                             lambda percent: progress and progress({'phase': 'scan', 'percent': percent}), words)
+        atomic_json(cache_path, {'source_id': project.get('source_id'), 'frames': frames, 'scanned': scanned})
+        if read_json(run, 'editor-project.json')['revision'] != project['revision']:
+            raise EditorError('project_changed', 'Editor project changed')
+        for x in candidates:
+            if found[x['id']] and found[x['id']] != x['scenes']:
+                x['scenes'] = found[x['id']]
+                if x.get('status') == 'baked':
+                    x['status'] = 'refining'
+        project['revision'] += 1
+        atomic_json(run / 'editor-project.json', project)
+        return
     with failure_code('invalid_edit'):
         rows = read_json(run, 'transcript.json')['segments']
         def timing(item):
@@ -532,10 +608,33 @@ async def run_editor(config, progress=None):
     atomic_json(run / 'editor-project.json', project)
 
 
+def tight_ranges(ranges, transcript, plan):
+    """Selected ranges minus dead air and filler words, cut as Automatic's tight pacing does.
+
+    Applied at export only, so Jev's cut review (one call per gap between ranges) is unchanged.
+    """
+    a, b = ranges[0][0], ranges[-1][1]
+    # Fit is a framing choice here, not a screen recording: cut its pauses like a talking head's (0.7s+).
+    plan = replace(plan, shots=[replace(s, layout=LayoutType.TALKING_HEAD) if s.layout == LayoutType.SCREEN else s for s in plan.shots])
+    keeps = compute_keep_intervals(window_words(transcript, a, b - a), b - a, plan, reaction_intervals(transcript, a, b - a))
+    result = [(lo, hi) for s, e in ranges for ks, ke in keeps
+              for lo, hi in [(max(s, a + ks), min(e, a + ke))] if hi - lo >= 100]
+    return result or [tuple(r) for r in ranges]
+
+
 async def export_clip(run, project, c, output, source, transcript):
     """Render one ready candidate and append it to the library's job output."""
     from clip_engine.config import get_caption_preset
     render_transcript = caption_transcript(transcript, c.get('caption_edits', []))
+    style = get_caption_preset(c['caption_preset'])
+    style.primary_color = c.get('caption_color', style.primary_color)
+    style.highlight_color = c.get('caption_highlight', style.highlight_color)
+    if style.highlight_box_color:
+        style.highlight_box_color = c.get('caption_box', style.highlight_box_color)
+    for name in RenderingService._CAPTION_PIXEL_FIELDS:
+        value = getattr(style, name, None)
+        if c.get('caption_scale', 1) != 1 and isinstance(value, (int, float)) and not isinstance(value, bool) and value:
+            setattr(style, name, max(1, round(value * c['caption_scale'])))
     next_index = output.get('next_clip_index', 0)
     if type(next_index) is not int or not 0 <= next_index <= 1000:
         raise EditorError('invalid_edit', 'Invalid export sequence')
@@ -547,6 +646,10 @@ async def export_clip(run, project, c, output, source, transcript):
     with failure_code('engine_unavailable'):
         renderer = RenderingService()
     a, b = c['ranges'][0][0], c['ranges'][-1][1]
+    plan = manual_plan(project, c)
+    ranges = [tuple(interval) for interval in c['ranges']]
+    if project.get('pacing', 'tight') == 'tight':
+        ranges = tight_ranges(ranges, transcript, plan)
     path = run / f'clip_{index:02d}.mp4'
     if path.exists() or path.is_symlink():
         raise ValueError('Export file already exists')
@@ -554,11 +657,12 @@ async def export_clip(run, project, c, output, source, transcript):
     with tempfile.TemporaryDirectory(prefix='.editor-export-', dir=run) as work, failure_code('render_failed'):
         result = await renderer.render_clip(RenderRequest(video_path=source, output_path=str(Path(work) / 'clip.mp4'),
             start_time_ms=a, end_time_ms=b, source_width=project['width'], source_height=project['height'],
-            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=get_caption_preset(c['caption_preset']),
+            transcript_segments=render_transcript, include_captions=c['captions'], caption_style=style,
             caption_suppression_ranges_ms=[tuple(interval) for interval in c.get('caption_suppression_ranges', [])],
-            caption_y=c.get('caption_y'),
+            caption_y=c.get('caption_y'), include_title=c.get('title_card', False), title_text=c['title'],
+            title_y=c.get('title_y'), title_scale=c.get('title_scale', 1), title_font=c.get('title_font', 'montserrat'),
             apply_padding=False, aspect_ratio=project['aspect_ratio'], pacing='natural', video_speed=c['video_speed'],
-            manual_ranges_ms=[tuple(interval) for interval in c['ranges']], manual_plan=manual_plan(project, c)))
+            manual_ranges_ms=ranges, manual_plan=plan))
         os.replace(result.output_path, path)
     output['clips'].append({'clip_index': index, 's3_url': str(path), 'duration_ms': result.duration_ms,
         'start_time_ms': a, 'end_time_ms': b, 'virality_score': c['score'], 'layout_type': result.layout_type,

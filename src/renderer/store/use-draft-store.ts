@@ -23,7 +23,7 @@ export interface ClipDraft {
   transcriptionModel: string
   aspectRatio: '9:16' | '16:9'
   /** 9:16 framing: smart per-shot layouts, always full frame, or letterbox. */
-  layoutStyle: 'auto' | 'fill' | 'fit'
+  layoutStyle: 'auto' | 'fill' | 'fit' | 'split' | 'debate'
   /** Paid vision verification for ambiguous shots in Smart framing. */
   layoutVision: boolean
   /** tight: cut dead air and filler words; natural: original timing. */
@@ -36,6 +36,8 @@ export interface ClipDraft {
   maxClips: number
   includeCaptions: boolean
   captionPreset: string
+  /** Automatic clips: caption colour overrides, keyed like the editor's. */
+  captionColors: Partial<Record<'caption_color' | 'caption_highlight' | 'caption_box', string>>
   /** Automatic clips: the title card at the top of each clip. */
   includeTitle: boolean
   trimOpen: boolean
@@ -72,6 +74,7 @@ export const useDraftStore = create<DraftState>((set) => ({
   maxClips: 5,
   includeCaptions: true,
   captionPreset: 'pop',
+  captionColors: {},
   includeTitle: true,
   trimOpen: false,
   trimStart: '',

@@ -1,9 +1,9 @@
 import { execFile, spawn, type ChildProcess } from 'child_process'
-import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
+import { constants, closeSync, createWriteStream, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from 'fs'
 import { pipeline } from 'stream/promises'
 import { delimiter, dirname, join } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { EDITOR_REVISION_CONFLICT, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession } from '../shared/clip-editor'
+import { EDITOR_REVISION_CONFLICT, editorFailureMessage, editorProgress, isEditorErrorCode, parseCandidateEdit, parseEditorProject, renderEditKey, type CandidateEdit, type EditorBatch, type EditorErrorCode, type EditorProgressSummary, type EditorProject, type EditorSession, type EditorWords } from '../shared/clip-editor'
 import { loadSettings, getSettingsForBridge } from './settings-store'
 import { assertAbsolutePath, assertMediaPath, isWithinDirectory, openAuthorizedMedia } from './security'
 import { getJobOutput } from './file-manager'
@@ -11,7 +11,7 @@ import { getBridgeRunnerPath, getEnginePath, resolvePythonPath, runtimeEnvironme
 import { resolveBinary } from './tools'
 import { logger } from './logger'
 
-type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'replace-source'
+type WorkerAction = 'review' | 'export' | 'export-all' | 'scan-cameras' | 'follow-speaker' | 'replace-source'
 interface EditorOperation { progress?: EditorSession['progress']; action: NonNullable<EditorSession['operation']>; child?: ChildProcess; cancelled?: boolean; abort?: AbortController; batch?: EditorBatch }
 const operations = new Map<string, EditorOperation>()
 export function editorBusy(path: string): boolean { return operations.has(realpathSync(path)) }
@@ -76,6 +76,18 @@ function sweepEditorFiles(run: string, project?: EditorProject): void {
 function mediaSize(paths: string[]): number {
   return paths.reduce((total, file) => { try { return total + statSync(file).size } catch { return total } }, 0)
 }
+/** Real word times for the caption preview, one list per project transcript line. Best effort: none means timing by length. */
+function readWords(run: string, lines: number): EditorWords | undefined {
+  try {
+    const file = join(run, 'transcript.json'), stat = lstatSync(file)
+    if (!stat.isFile() || stat.size > 64 * 1024 * 1024) return undefined
+    const segments: unknown = JSON.parse(readFileSync(file, 'utf8'))?.segments
+    if (!Array.isArray(segments) || segments.length !== lines) return undefined
+    return segments.map((s) => (Array.isArray(s?.words) ? s.words as { word?: unknown; start_time_ms?: unknown; end_time_ms?: unknown }[] : [])
+      .filter((w) => typeof w?.word === 'string' && Number.isFinite(w.start_time_ms) && Number.isFinite(w.end_time_ms))
+      .map((w) => [w.word as string, w.start_time_ms as number, w.end_time_ms as number]))
+  } catch { return undefined }
+}
 export async function openEditor(path: unknown): Promise<EditorSession> {
   const run = runPath(path)
   if (!(await getJobOutput(run, loadSettings().outputDirectory))?.editor_project) throw new Error('This run has no editor project')
@@ -89,7 +101,7 @@ export async function openEditor(path: unknown): Promise<EditorSession> {
     if (lstatSync(file).isSymbolicLink() || !isWithinDirectory(file, run)) throw new Error('Editor source is missing')
     assertMediaPath(file, loadSettings().outputDirectory)
   }
-  return { project, sourcePath, previewPath, mediaBytes: mediaSize([sourcePath, previewPath]), ...state }
+  return { project, sourcePath, previewPath, mediaBytes: mediaSize([sourcePath, previewPath]), words: readWords(run, project.transcript.length), ...state }
 }
 
 type ProgressCounts = Omit<EditorProgressSummary, 'operation' | 'batch' | 'progress'>
@@ -189,7 +201,7 @@ export async function replaceEditorSource(path: unknown, revision: unknown, repl
   return executeEditor(path, revision, undefined, 'replace-source', replacement)
 }
 export async function runEditor(path: unknown, revision: unknown, candidateId: unknown, action: unknown): Promise<EditorSession> {
-  if (action !== 'review' && action !== 'export' && action !== 'export-all' && action !== 'scan-cameras') throw new Error('Invalid editor operation')
+  if (action !== 'review' && action !== 'export' && action !== 'export-all' && action !== 'scan-cameras' && action !== 'follow-speaker') throw new Error('Invalid editor operation')
   return executeEditor(path, revision, candidateId, action)
 }
 
@@ -222,7 +234,7 @@ function runWorker(run: string, operation: EditorOperation, action: WorkerAction
       try {
         const value = JSON.parse(line)
         if (value?.type === 'progress') {
-          if (action === 'scan-cameras' && (value.phase === 'scan' || value.phase === 'preview') &&
+          if ((action === 'scan-cameras' || action === 'follow-speaker') && (value.phase === 'scan' || value.phase === 'preview') &&
               typeof value.percent === 'number' && Number.isFinite(value.percent) && value.percent >= 0 && value.percent <= 100) {
             const previous = operation.progress
             if (!previous || (previous.phase === 'scan' && value.phase === 'preview') ||
@@ -278,7 +290,7 @@ function batchFailure(batch: EditorBatch, failed: { title: string; error: Error 
 async function executeEditor(path: unknown, revision: unknown, candidateId: unknown, action: WorkerAction, replacement?: string): Promise<EditorSession> {
   const run = runPath(path)
   if (operations.has(run) || operations.size >= 2) throw new Error('An editor operation is already running. Try again when it finishes.')
-  const operation: EditorOperation = { action, ...(action === 'scan-cameras' ? { progress: { phase: 'scan', percent: 0 } as const } : {}) }
+  const operation: EditorOperation = { action, ...(action === 'scan-cameras' || action === 'follow-speaker' ? { progress: { phase: 'scan', percent: 0 } as const } : {}) }
   operations.set(run, operation)
   const sourceId = action === 'replace-source' ? randomUUID().replaceAll('-', '') : undefined
   const previewId = action === 'scan-cameras' ? randomUUID().replaceAll('-', '') : undefined

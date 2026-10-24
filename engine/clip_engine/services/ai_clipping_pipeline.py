@@ -174,9 +174,12 @@ class AIClippingPipeline:
         self,
         progress_callback: Optional[Callable[[ClippingJobProgress], None]] = None,
         webhook_service: Optional[WebhookService] = None,
+        # Split style: given {image, width, height, crops}, returns the user's crops or None.
+        framing_callback: Optional[Callable[[dict], Any]] = None,
     ):
         self.settings = get_settings()
         self.progress_callback = progress_callback
+        self.framing_callback = framing_callback
         self.webhook_service = webhook_service or get_webhook_service()
 
         self.video_downloader = VideoDownloaderService()
@@ -208,9 +211,10 @@ class AIClippingPipeline:
         loop = asyncio.get_running_loop()
         start_time = time.time()
         job_id = request.job_id
-        jev_enabled = request.workflow == 'review' or getattr(self.settings, 'jev_enabled', False)
+        # Jev's setting drives clip selection in both workflows; review also asks Jev for editor notes.
+        jev_enabled = getattr(self.settings, 'jev_enabled', False)
         editorial_service = JevService.from_settings(self.settings, required=request.workflow == 'review')
-        coherence_service = JevService(self.settings.openrouter_api_key if jev_enabled else '', max_requests=256, token_budget=1536000)
+        coherence_service = JevService(self.settings.openrouter_api_key if jev_enabled or request.workflow == 'review' else '', max_requests=256, token_budget=1536000)
         work_dir = os.path.join(self.settings.temp_directory, job_id)
         stage_timings: dict[str, float] = {}
         stage_memory_mb: dict[str, float] = {}
@@ -427,34 +431,6 @@ class AIClippingPipeline:
             editorial_vision = EditorialVision(self.settings, download_result.video_path, work_dir, round(video_duration * 1000))
             reviewer.source_context = context_brief
             reviewer.visual_observer = editorial_vision.observe if getattr(self.settings, 'jev_visual_context', False) else None
-            if request.workflow == 'review':
-                if not self.local_mode:
-                    raise ValueError('Review projects require local mode')
-                from clip_engine.services.manual_editor import prepare_project
-                project = await prepare_project(request, clip_plan.segments, transcription_result.segments,
-                    download_result, self.rendering_service, reviewer, self._get_local_output_dir(job_id),
-                    lambda message, percent=None, stage='preparing': self._update_progress(job_id, JobStatus.PLANNING,
-                        {'preparing': 40, 'saving': 80, 'preview': 85}[stage] + (percent or 0) * {'preparing': .4, 'saving': .05, 'preview': .1}[stage], message,
-                        stage_id=stage, stage_percent=percent))
-                edit_audit['outcome'] = 'ready_for_review'
-                save_edit_audit()
-                costs = source_context_cost + coherence_service.estimated_cost_usd
-                for api in (transcription_result.api_costs, clip_plan.api_costs):
-                    costs += getattr(api, 'estimated_cost_usd', 0) if api else 0
-                output = JobOutput(job_id=job_id, source_video_url=request.video_url,
-                    source_video_title=download_result.metadata.title, source_video_duration_seconds=video_duration,
-                    source_video_description=(getattr(download_result.metadata, 'description', '') or '')[:20000],
-                    source_video_channel=getattr(download_result.metadata, 'uploader', None),
-                    total_clips=0, clips=[], editor_project=True, transcript_url=transcript_upload.s3_url,
-                    processing_time_seconds=time.time() - start_time,
-                    metrics={'planned_clip_count': len(project['candidates']),
-                        'api_costs': {'total_estimated_cost_usd': costs, 'cost_incomplete': True},
-                        'diagnostics': self._diagnostics.snapshot(),
-                        'pipeline_stages': self._stage_progress.update('completed')})
-                self._save_local_json(job_id, 'job_output', asdict(output))
-                self._update_progress(job_id, JobStatus.COMPLETED, 100, 'Ready to edit')
-                return ClippingJobResult(job_id=job_id, status=JobStatus.COMPLETED, output=output,
-                    processing_time_seconds=time.time() - start_time)
             accepted = []
             limit = getattr(self.intelligence_planner, 'discovery_limit', None) or request.max_clips or self.settings.max_clips_absolute
             pending = clip_plan.segments
@@ -541,6 +517,35 @@ class AIClippingPipeline:
                 edit_audit['outcome'] = 'no_approved_clips'
                 save_edit_audit()
                 raise CoherenceRejected(no_approved_clips_message([entry['report'] for entry in edit_audit['candidates']]))
+            # Review starts from the same selected clips as an automatic run.
+            if request.workflow == 'review':
+                if not self.local_mode:
+                    raise ValueError('Review projects require local mode')
+                from clip_engine.services.manual_editor import prepare_project
+                project = await prepare_project(request, clip_plan.segments, transcription_result.segments,
+                    download_result, self.rendering_service, reviewer, self._get_local_output_dir(job_id),
+                    lambda message, percent=None, stage='preparing': self._update_progress(job_id, JobStatus.PLANNING,
+                        {'preparing': 40, 'saving': 80, 'preview': 85}[stage] + (percent or 0) * {'preparing': .4, 'saving': .05, 'preview': .1}[stage], message,
+                        stage_id=stage, stage_percent=percent))
+                edit_audit['outcome'] = 'ready_for_review'
+                save_edit_audit()
+                costs = source_context_cost + coherence_service.estimated_cost_usd
+                for api in (transcription_result.api_costs, clip_plan.api_costs):
+                    costs += getattr(api, 'estimated_cost_usd', 0) if api else 0
+                output = JobOutput(job_id=job_id, source_video_url=request.video_url,
+                    source_video_title=download_result.metadata.title, source_video_duration_seconds=video_duration,
+                    source_video_description=(getattr(download_result.metadata, 'description', '') or '')[:20000],
+                    source_video_channel=getattr(download_result.metadata, 'uploader', None),
+                    total_clips=0, clips=[], editor_project=True, transcript_url=transcript_upload.s3_url,
+                    processing_time_seconds=time.time() - start_time,
+                    metrics={'planned_clip_count': len(project['candidates']),
+                        'api_costs': {'total_estimated_cost_usd': costs, 'cost_incomplete': True},
+                        'diagnostics': self._diagnostics.snapshot(),
+                        'pipeline_stages': self._stage_progress.update('completed')})
+                self._save_local_json(job_id, 'job_output', asdict(output))
+                self._update_progress(job_id, JobStatus.COMPLETED, 100, 'Ready to edit')
+                return ClippingJobResult(job_id=job_id, status=JobStatus.COMPLETED, output=output,
+                    processing_time_seconds=time.time() - start_time)
 
             plan_data = {
                 "segments": [asdict(s) for s in clip_plan.segments],
@@ -572,6 +577,11 @@ class AIClippingPipeline:
             os.makedirs(clips_dir, exist_ok=True)
 
             total_clips = len(clip_plan.segments)
+            split_crops = None
+            if request.layout_style == LayoutStyle.SPLIT and request.aspect_ratio == "9:16" and clip_plan.segments:
+                self._update_progress(job_id, JobStatus.RENDERING, 50, "Waiting for you to set the split framing...",
+                                      clips_completed=0, total_clips=total_clips, stage_percent=0)
+                split_crops = await self._choose_split_crops(download_result, clip_plan.segments[0])
             self._update_progress(
                 job_id, JobStatus.RENDERING, 50,
                 f"Rendering {total_clips} clip{'s' if total_clips != 1 else ''}...",
@@ -640,6 +650,7 @@ class AIClippingPipeline:
                         source_height=download_result.metadata.height,
                         # Always passed: tight pacing needs word timings even without captions.
                         transcript_segments=clip_transcript,
+                        source_transcript=transcription_result.segments,
                         include_captions=request.include_captions and transcription_status == "available",
                         caption_style=request.caption_style,
                         title_text=segment.summary,
@@ -649,6 +660,7 @@ class AIClippingPipeline:
                         banner_channel_url=request.banner_channel_url,
                         aspect_ratio=request.aspect_ratio,
                         layout_style=request.layout_style,
+                        split_crops=split_crops,
                         debug_capture=request.debug_capture,
                         pacing=request.pacing,
                         video_speed=request.video_speed,
@@ -1242,6 +1254,46 @@ class AIClippingPipeline:
                 f.write("\n".join(lines).strip() + "\n")
         except OSError as e:
             logger.warning(f"Could not write upload notes: {e}")
+
+    async def _choose_split_crops(self, download_result, segment) -> list[list[float]]:
+        """Split style: two panel crops placed on the first clip's faces, then adjusted once by the user."""
+        from clip_engine.services.layout_renderer import shot_views
+        from clip_engine.services.manual_editor import default_crop, view_crops
+        from clip_engine.services.media_process import MEDIA_INPUT_OPTIONS, PROBE_TIMEOUT_SECONDS, run_media
+
+        video_path = download_result.video_path
+        w, h = await self.rendering_service._get_video_dimensions(video_path)
+        panel_aspect = 9 / 16 * 2  # each half of a 1080x1920 frame
+        crops = [default_crop(w, h, panel_aspect, .25), default_crop(w, h, panel_aspect, .75)]
+        at_ms = (segment.start_time_ms + segment.end_time_ms) // 2
+        try:
+            plan = await self.rendering_service.layout_analyzer.analyze(
+                video_path, segment.start_time_ms, segment.end_time_ms - segment.start_time_ms, w, h,
+                LayoutStyle.AUTO, vision=False, precise=False)
+            for shot in plan.shots if plan else []:
+                mid = (shot.start_ms + shot.end_ms) // 2
+                views = shot_views(shot, mid, w, h, 1080, 1920)
+                if len(views) == 2:
+                    crops, at_ms = view_crops(views, w, h, 9 / 16), segment.start_time_ms + mid
+                    break
+        except Exception as e:
+            logger.warning(f"Split framing detection failed; using side-by-side defaults: {e}")
+        if not self.framing_callback:
+            return crops
+        try:
+            frame = await asyncio.to_thread(run_media, [
+                "ffmpeg", "-v", "error", "-ss", f"{at_ms / 1000:.3f}", *MEDIA_INPUT_OPTIONS, "-i", video_path,
+                "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+            ], timeout=PROBE_TIMEOUT_SECONDS, check=True)
+            import base64
+            chosen = await self.framing_callback({
+                "image": "data:image/jpeg;base64," + base64.b64encode(frame.stdout).decode(),
+                "width": w, "height": h, "crops": crops,
+            })
+        except Exception as e:
+            logger.warning(f"Split framing adjustment unavailable; using detected crops: {e}")
+            return crops
+        return chosen or crops
 
     def _filter_transcript_for_clip(
         self,

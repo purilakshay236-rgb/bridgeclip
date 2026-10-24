@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -30,7 +31,7 @@ logger = logging.getLogger("bridge_runner")
 _protocol = None
 
 # Mirrors DURATION_OPTIONS in src/shared/job-contract.ts.
-DURATION_RANGE_IDS = ("xshort", "short", "medium", "long", "xlong", "extended", "feature")
+DURATION_RANGE_IDS = ("xshort", "short", "standard", "medium", "long", "xlong", "extended", "feature")
 
 # Known failure classes -> (message, hint). Raw engine errors can contain
 # request URLs, proxy credentials and local paths, so only these fixed strings
@@ -90,6 +91,9 @@ FAILURES = (
     (("video render failed",),
      "Clip rendering failed.",
      "Run Settings → System check. If all tools are ready, report this run so the render can be diagnosed."),
+    (("youtube is blocking this request",),
+     "YouTube asked BridgeClip to confirm it isn't a bot.",
+     "YouTube does this after many downloads in a short time. Wait a while and retry, or download the video yourself and clip it as a local file."),
     (("http error 403", "sign in to confirm", "blocking this request"),
      "The video service refused the download.",
      "Update BridgeClip and retry. If it keeps happening, download the video yourself and clip it as a local file."),
@@ -183,6 +187,25 @@ def progress_callback(progress) -> None:
     })
 
 
+def valid_split_crops(value: object) -> bool:
+    """Two normalized (x, y, w, h) crops inside the frame."""
+    return (isinstance(value, list) and len(value) == 2 and all(
+        isinstance(c, list) and len(c) == 4 and all(type(n) in (int, float) and math.isfinite(n) for n in c)
+        and 0 <= c[0] and 0 <= c[1] and 0 < c[2] <= 1 and 0 < c[3] <= 1
+        and c[0] + c[2] <= 1.001 and c[1] + c[3] <= 1.001 for c in value))
+
+
+async def framing_callback(request: dict):
+    """Ask Electron for the split framing once; None (keep the detected crops) if stdin closes or the reply is invalid."""
+    emit({"type": "framing", **request})
+    line = await asyncio.to_thread(sys.stdin.readline, 4096)
+    try:
+        crops = json.loads(line).get("crops") if line.strip() else None
+    except (ValueError, AttributeError):
+        crops = None
+    return crops if valid_split_crops(crops) else None
+
+
 async def run(config: dict) -> bool:
     """Run the clipping pipeline with the given config."""
     config = validate_config(config)
@@ -253,6 +276,13 @@ async def run(config: dict) -> bool:
                 caption_style = get_caption_preset("pop")
             except ValueError:
                 pass
+    if caption_style:
+        colors = {k: v for k, v in (config.get("caption_colors") or {}).items()
+                  if isinstance(v, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", v)}
+        caption_style.primary_color = colors.get("caption_color", caption_style.primary_color)
+        caption_style.highlight_color = colors.get("caption_highlight", caption_style.highlight_color)
+        if caption_style.highlight_box_color:
+            caption_style.highlight_box_color = colors.get("caption_box", caption_style.highlight_box_color)
 
     duration_ranges = config.get("duration_ranges")
 
@@ -293,7 +323,7 @@ async def run(config: dict) -> bool:
         "clips_total": 0,
     })
 
-    pipeline = AIClippingPipeline(progress_callback=progress_callback)
+    pipeline = AIClippingPipeline(progress_callback=progress_callback, framing_callback=framing_callback)
     start = time.monotonic()
     result = await pipeline.process_video(request)
     elapsed = time.monotonic() - start
@@ -357,7 +387,7 @@ def validate_config(config: object) -> dict:
         raise ValueError("max_clips must be between 1 and 100")
     if config.get("aspect_ratio", "9:16") not in ("9:16", "16:9"):
         raise ValueError("Invalid aspect ratio")
-    if config.get("layout_style", "auto") not in ("auto", "fill", "fit"):
+    if config.get("layout_style", "auto") not in ("auto", "fill", "fit", "split", "debate"):
         raise ValueError("Invalid layout style")
     if config.get("pacing", "tight") not in ("tight", "natural"):
         raise ValueError("Invalid pacing")
@@ -408,7 +438,8 @@ def main() -> int:
     try:
         # Legacy CLI argument remains accepted; Electron uses stdin to keep
         # private source URLs out of process listings. Bound either transport.
-        raw = sys.argv[1] if len(sys.argv) == 2 else sys.stdin.read(65537)
+        # One line: Electron keeps stdin open afterwards for the split framing reply.
+        raw = sys.argv[1] if len(sys.argv) == 2 else sys.stdin.readline(65537)
         if len(raw) > 65536:
             raise ValueError("Config too large")
         config = validate_config(json.loads(raw))

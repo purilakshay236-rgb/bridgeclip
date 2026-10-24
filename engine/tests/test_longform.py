@@ -127,12 +127,19 @@ class TestPlanning:
         assert {"skip", "chapters", "description"} <= set(item["required"])
 
     @pytest.mark.parametrize("jev,role", [(False, "scroll-stopping"), (True, "complete, faithful excerpts")])
-    def test_short_form_prompt_and_schema_are_unchanged(self, monkeypatch, jev, role):
+    def test_short_form_prompt_and_schema_only_add_tangent_skips(self, monkeypatch, jev, role):
         transcript = make_transcript(300)
         _, payload = self.run_plan(monkeypatch, transcript, ["short"], "16:9", jev=jev)
-        assert role in payload["messages"][0]["content"]
+        prompt = payload["messages"][0]["content"]
+        assert role in prompt
+        assert "TANGENT SKIPS" in prompt
         item = payload["response_format"]["json_schema"]["schema"]["properties"]["clips"]["items"]
-        assert "skip" not in item["properties"]
+        assert "skip" in item["properties"] and "skip" in item["required"]
+        assert "chapters" not in item["properties"]
+
+    def test_longform_prompt_has_no_short_form_tangent_rule(self, monkeypatch):
+        _, payload = self.run_plan(monkeypatch, make_transcript(300), ["extended"], "16:9")
+        assert "TANGENT SKIPS" not in payload["messages"][0]["content"]
 
     @pytest.mark.parametrize("jev,rule", [
         (False, "Clips outside 600-900 seconds are REJECTED."),
@@ -190,6 +197,42 @@ class TestPlanning:
         seg = planner._parse_clip_plan_response(completion([longform_clip(start, end, skip=[big])])).segments[0]
         assert seg.skip_ranges_ms
         assert sum(b - a for a, b in seg.skip_ranges_ms) < seg.end_time_ms - seg.start_time_ms
+
+
+class TestShortTangentSkips:
+    @staticmethod
+    def short_clip(start, end, skip=()):
+        return {
+            "start_time": start, "end_time": end, "summary": "The Real Story", "tags": ["a"], "emphasis": [],
+            "scores": {k: 7 for k in ("hook", "standalone", "arc", "quotability", "ending")},
+            "skip": [{"start_time": a, "end_time": b} for a, b in skip],
+        }
+
+    def test_tangent_is_cut_on_sentence_boundaries(self):
+        tr = make_transcript(40)                                 # ~5 s sentences
+        planner = planner_for(tr, ["short"], aspect="9:16")      # 30-60 s
+        start, end = tr[0].start_time_ms / 1000, tr[9].end_time_ms / 1000    # ~50 s
+        tangent = (tr[3].start_time_ms / 1000 + 0.4, tr[6].start_time_ms / 1000 - 0.3)    # ~15 s
+        seg = planner._parse_clip_plan_response(completion([self.short_clip(start, end, [tangent])])).segments[0]
+        assert len(seg.skip_ranges_ms) == 1
+        s_ms, e_ms = seg.skip_ranges_ms[0]
+        assert s_ms in {s.words[-1].end_time_ms for s in tr} and e_ms in {s.start_time_ms for s in tr}
+        assert e_ms - s_ms > 8000
+
+    def test_tangent_that_would_break_the_minimum_length_is_dropped(self):
+        tr = make_transcript(40)
+        planner = planner_for(tr, ["short"], aspect="9:16")      # 30 s minimum
+        start, end = tr[0].start_time_ms / 1000, tr[7].end_time_ms / 1000    # ~40 s
+        tangent = (tr[2].start_time_ms / 1000, tr[6].start_time_ms / 1000)   # ~20 s -> 20 s left
+        seg = planner._parse_clip_plan_response(completion([self.short_clip(start, end, [tangent])])).segments[0]
+        assert seg.skip_ranges_ms == []
+
+    def test_missing_skip_field_means_no_skips(self):
+        tr = make_transcript(40)
+        planner = planner_for(tr, ["short"], aspect="9:16")
+        clip = self.short_clip(tr[0].start_time_ms / 1000, tr[9].end_time_ms / 1000)
+        del clip["skip"]
+        assert planner._parse_clip_plan_response(completion([clip])).segments[0].skip_ranges_ms == []
 
 
 class TestPacing:

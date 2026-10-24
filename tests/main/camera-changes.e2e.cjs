@@ -170,7 +170,7 @@ test('camera scanning, exact frame edits, dismissals and Space playback survive 
   assert.equal(await camera.getByRole('button', { name: /^Camera change at/ }).count(), 2)
   assert.equal(await page.getByRole('button', { name: /^(Previous|Next) camera change$/ }).count(), 0)
   assert.equal(await page.getByText(/\d+ potential changes?/).count(), 0)
-  assert.equal(await page.locator('.editor-stagebar .editor-status').innerText(), 'Ready')
+  assert.equal(await page.locator('.editor-stagebar .editor-status').innerText(), 'Marked for export')
   const saved = () => JSON.parse(fs.readFileSync(path.join(run, 'editor-project.json'), 'utf8'))
   const cut = saved().candidates[0].camera_scan.markers[0].at_ms
   assert.ok(Math.abs(cut - 37 * 1001 / 24) < .01)

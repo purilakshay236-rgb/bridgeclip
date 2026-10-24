@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from clip_engine.services.manual_editor import prepare_project, review_candidate, manual_plan, validate_candidate, run_editor, signature, scene_motion, caption_transcript
+from clip_engine.services.manual_editor import prepare_project, review_candidate, manual_plan, validate_candidate, run_editor, signature, scene_motion, caption_transcript, tight_ranges
 from clip_engine.services.transcription_service import TranscriptSegment, TranscriptWord
 from clip_engine.services.coherence_review import CLIP_QUESTIONS, CUT_QUESTIONS
 from clip_engine.services.layout_renderer import build_layout_graph, shot_views
@@ -244,7 +244,7 @@ def test_manual_render_never_replans_or_restores_user_cuts(monkeypatch, tmp_path
 def test_export_appends_library_clip_and_preserves_source_and_previous_exports(monkeypatch, tmp_path):
     from dataclasses import asdict
     from clip_engine.services.rendering_service import RenderResult
-    c = {**candidate(), 'status': 'ready', 'caption_edits': [{'segment': 1, 'text': 'The corrected event happened.'}], 'caption_suppression_ranges': [[2000, 4000]], 'caption_y': .25}
+    c = {**candidate(), 'status': 'ready', 'caption_edits': [{'segment': 1, 'text': 'The corrected event happened.'}], 'caption_suppression_ranges': [[2000, 4000]], 'caption_y': .25, 'title_card': True, 'title_y': .3, 'title_scale': 1.5, 'caption_scale': 1.5, 'caption_color': '#FF0000'}
     project = {'version': 1, 'revision': 3, 'width': 1920, 'height': 1080, 'duration_ms': 12000, 'aspect_ratio': '9:16', 'candidates': [c],
         'transcript': [{'start_ms': s.start_time_ms, 'end_ms': s.end_time_ms, 'text': s.text} for s in transcript()]}
     (tmp_path / 'editor-project.json').write_text(json.dumps(project))
@@ -257,6 +257,11 @@ def test_export_appends_library_clip_and_preserves_source_and_previous_exports(m
         assert request.manual_ranges_ms == [(1000, 5000), (7000, 10000)] and request.include_captions
         assert request.caption_suppression_ranges_ms == [(2000, 4000)]
         assert request.caption_y == .25
+        assert request.include_title and request.title_text == c['title']
+        assert request.title_y == .3 and request.title_scale == 1.5
+        assert request.caption_style.primary_color == '#FF0000'
+        from clip_engine.config import get_caption_preset
+        assert request.caption_style.font_size == round(get_caption_preset(c['caption_preset']).font_size * 1.5)
         assert request.transcript_segments[1].text == 'The corrected event happened.'
         assert [w.word for w in request.transcript_segments[1].words] == ['The', 'corrected', 'event', 'happened.']
         Path(request.output_path).write_bytes(b'final clip')
@@ -357,7 +362,7 @@ def test_unready_or_failed_export_never_marks_baked(monkeypatch, tmp_path, statu
 
 @pytest.mark.parametrize('jev_enabled', [True, False])
 @pytest.mark.parametrize('available', [True, False])
-def test_pipeline_review_stops_before_automatic_repairs_and_render(monkeypatch, tmp_path, jev_enabled, available):
+def test_pipeline_review_uses_automatic_selection_and_does_not_render(monkeypatch, tmp_path, jev_enabled, available):
     from clip_engine.services import ai_clipping_pipeline as module
     from clip_engine.services.ai_clipping_pipeline import AIClippingPipeline, ClippingJobRequest, JobStatus
     from clip_engine.services.intelligence_planner import ClipPlanResponse
@@ -384,23 +389,27 @@ def test_pipeline_review_stops_before_automatic_repairs_and_render(monkeypatch, 
     pipeline.video_downloader.download_video = AsyncMock(return_value=SimpleNamespace(video_path=str(source), file_size_bytes=6,
         metadata=SimpleNamespace(title='A manual source', duration_seconds=12, width=1920, height=1080)))
     pipeline.transcription_service.transcribe = AsyncMock(return_value=TranscriptionResult(segments=transcript(), full_text='Original source'))
-    pipeline.intelligence_planner.plan_clips = AsyncMock(return_value=ClipPlanResponse(segments=[ClipPlanSegment(0, 5000, .8, summary='First'), ClipPlanSegment(6000, 11000, .7, summary='Second')], total_clips=2))
+    pipeline.intelligence_planner.plan_clips = AsyncMock(return_value=ClipPlanResponse(segments=[ClipPlanSegment(0, 5500, .8, summary='First'), ClipPlanSegment(100, 5500, .75, summary='Overlap'), ClipPlanSegment(6000, 11000, .7, summary='Second')], total_clips=3))
     pipeline.rendering_service._get_video_dimensions = AsyncMock(return_value=(1920, 1080))
     async def preview(src, dest, **kwargs): Path(dest).write_bytes(b'preview')
     pipeline.rendering_service.capture_framing_source = AsyncMock(side_effect=preview)
     pipeline.rendering_service.render_clip = AsyncMock(side_effect=AssertionError('Review must not render'))
-    monkeypatch.setattr(module.CoherenceReviewer, 'prepare', AsyncMock(side_effect=AssertionError('Review must not repair')))
+    # Review selects like an automatic run: Jev approval only when Jev is on, overlaps dropped either way.
+    prepare = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.CoherenceReviewer, 'prepare', prepare)
     result = asyncio.run(pipeline.process_video(ClippingJobRequest(video_url=str(source), job_id='review-run', workflow='review', layout_style='fit')))
     assert result.status == JobStatus.COMPLETED, result.error
     assert result.output.editor_project and result.output.total_clips == 0
     project = json.loads((tmp_path / 'out/review-run/editor-project.json').read_text())
-    assert len(project['candidates']) == 2
+    assert [c['title'] for c in project['candidates']] == ['First', 'Second']
+    assert prepare.await_count == (3 if jev_enabled else 0)
     assert all(len(c['review']['questions']) == 8 for c in project['candidates'])
     assert calls
     assert settings.jev_enabled is jev_enabled
     assert all(c['review']['decision'] == ('passes' if available else 'needs_attention') for c in project['candidates'])
     audit = json.loads((tmp_path / 'out/review-run/edit_audit.json').read_text())
-    assert audit['jev_enabled'] is True
+    assert audit['jev_enabled'] is jev_enabled
+    assert [c['status'] for c in audit['candidates']] == ['accepted', 'overlap_not_selected', 'accepted']
     assert source.exists() and not (tmp_path / 'work/review-run').exists()
     pipeline.rendering_service.render_clip.assert_not_called()
 
@@ -512,6 +521,21 @@ def test_invalid_caption_position_is_rejected(y):
     with pytest.raises(ValueError, match='caption position'):
         validate_candidate({**candidate(), 'caption_y': y}, 12000)
 
+
+def test_title_card_must_be_boolean():
+    with pytest.raises(ValueError, match='title card'):
+        validate_candidate({**candidate(), 'title_card': 'yes'}, 12000)
+    for bad in ({'title_y': .01}, {'title_y': 'top'}, {'title_scale': 3}, {'title_scale': True}, {'caption_scale': .2}):
+        with pytest.raises(ValueError, match='title card'):
+            validate_candidate({**candidate(), **bad}, 12000)
+
+
+
+def test_title_font_must_be_a_bundled_face():
+    validate_candidate({**candidate(), 'title_font': 'anton'}, 12000)
+    for bad in ('Comic Sans', '../evil.ttf', 3):
+        with pytest.raises(ValueError, match='title font'):
+            validate_candidate({**candidate(), 'title_font': bad}, 12000)
 
 def export_fixture(tmp_path, monkeypatch, render):
     from dataclasses import asdict
@@ -649,3 +673,17 @@ def test_freed_editor_media_refuses_every_operation(monkeypatch, tmp_path):
             asyncio.run(run_editor({**config, 'action': action, 'source_id': 'a' * 32}))
         assert error.value.editor_code == 'source_missing'
     render.assert_not_called()
+
+
+def test_tight_export_drops_dead_air_inside_the_selected_ranges():
+    from clip_engine.services.layout_analyzer import ClipLayoutPlan, LayoutType, ShotLayout
+    words = [TranscriptWord('one', 0, 1000), TranscriptWord('two', 1000, 2000), TranscriptWord('three', 5000, 6000), TranscriptWord('four', 6000, 7000)]
+    segments = [TranscriptSegment('one two three four', 0, 7000, words=words)]
+    talking = ClipLayoutPlan([ShotLayout(0, 7000, LayoutType.TALKING_HEAD)], 1920, 1080)
+    ranges = tight_ranges([(0, 7000)], segments, talking)
+    assert len(ranges) == 2 and ranges[0][1] < 3000 < ranges[1][0]       # the 3s pause is cut
+    assert sum(b - a for a, b in ranges) < 5000
+    screen = ClipLayoutPlan([ShotLayout(0, 7000, LayoutType.SCREEN)], 1920, 1080)
+    assert tight_ranges([(0, 7000)], segments, screen) == ranges           # Fit framing cuts pauses like a talking head
+    # User cuts stay cut.
+    assert all(a >= 4000 or b <= 3000 for a, b in tight_ranges([(0, 3000), (4000, 7000)], segments, talking))

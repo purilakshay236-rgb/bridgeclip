@@ -28,6 +28,8 @@ from clip_engine.services.video_speed import speed_audio_filter, validate_video_
 # Two people get equal space. Screen shares start with more room for the
 # screen; a smaller webcam can move the seam farther down.
 TWO_SHOT_TOP_RATIO = 0.5
+# Debate: both speakers small on top, the current speaker large below.
+DEBATE_TOP_RATIO = 0.35
 SCREEN_CAM_TOP_RATIO = 0.6
 MAX_SCREEN_CAM_TOP_RATIO = 0.7
 # Never upscale a crop more than this (beyond it faces/text turn to mush).
@@ -397,7 +399,8 @@ def shot_chain(
                     f"crop=w={qw}:h={qh}:x='{x0}*round({qw}/{cw})':y='{y0}*round({qh}/{ch})':exact=1")
             else:
                 transform = f"crop={w}:{h}:{x}:{y}"
-            parts.append(f"[{source}]{transform},scale={pw}:{ph}:{scale},setsar=1[{target}]")
+            flip = ",hflip" if j < len(shot.manual_mirror) and shot.manual_mirror[j] else ""
+            parts.append(f"[{source}]{transform},scale={pw}:{ph}:{scale}{flip},setsar=1[{target}]")
         if n > 1:
             parts.append(''.join(f"[mp{i}_{j}]" for j in range(n)) + f"vstack=inputs={n}[v{i}]")
         return ';'.join(parts)
@@ -672,10 +675,16 @@ def build_layout_graph(
 FILL_CAPTION_Y = 1340
 FILL_BANNER_Y = 1590
 TOP_TITLE_Y = 110
+# Debate: a smaller title just above the captions on the seam, over the top
+# panel's chests and mics instead of anyone's face.
+DEBATE_TITLE_SCALE = .75
+DEBATE_TITLE_GAP = 90
 
 
 def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int]:
     """(ASS alignment, y) for captions during this shot."""
+    if len(shot.manual_crops) == 2:
+        return 5, manual_views(shot, src_w, src_h, out_w, out_h)[1][1][1]  # centered on the seam
     if shot.layout == LayoutType.TWO_SHOT or (shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None):
         return 5, stacked_panel_heights(shot, src_h, out_h)[0]  # centered on the seam
     if shot.layout in (LayoutType.SCREEN, LayoutType.SCREEN_CAM):
@@ -687,6 +696,9 @@ def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: 
 
 
 def title_y(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int, title_h: int) -> int:
+    if shot.manual_top_share and len(shot.manual_crops) == 2:
+        seam = manual_views(shot, src_w, src_h, out_w, out_h)[1][1][1]
+        return max(10, seam - DEBATE_TITLE_GAP - title_h)
     if shot.layout == LayoutType.SCREEN:
         _, overlay_y = foreground_geometry(shot, src_w, src_h, out_w, out_h)
         if overlay_y > title_h + 20:
@@ -736,7 +748,8 @@ class FaceZone:
 def manual_views(shot, src_w, src_h, out_w, out_h, t_ms=None):
     """Exact normalized crops shared with the editor. Round inward for yuv420p."""
     result = []
-    panel_h = even(out_h / len(shot.manual_crops))
+    share = shot.manual_top_share if len(shot.manual_crops) == 2 and shot.manual_top_share else 1 / len(shot.manual_crops)
+    panel_h = even(out_h * share)
     crops = shot.manual_crops
     if shot.manual_transition_ms and t_ms is not None:
         p = max(0, min(1, (t_ms - shot.manual_transition_start_ms) / shot.manual_transition_ms))

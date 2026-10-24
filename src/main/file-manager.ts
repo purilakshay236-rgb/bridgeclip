@@ -98,7 +98,7 @@ export async function getJobHistory(baseDir: string, activeJobIds: ReadonlySet<s
         const costVal = costs && typeof costs === 'object' ? (costs as Record<string, unknown>).total_estimated_cost_usd : null
         entries.push({
           favorite: isRunFavorite(join(baseDir, dir.name)),
-          jobId: dir.name,
+          jobId: record?.jobId ?? dir.name,
           date: record?.startedAt ?? result.modified.toISOString(),
           videoTitle: data.source_video_title,
           clipCount: data.clips.length,
