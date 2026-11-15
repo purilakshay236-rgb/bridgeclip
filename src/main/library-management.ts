@@ -156,10 +156,13 @@ export async function deleteLibraryClips(outputDir: unknown, indices: unknown): 
   }
   for (const clip of picked) {
     const file = resolve(clip.s3_url.replace(/^file:\/\//, ''))
-    const name = `clip_${String(clip.clip_index).padStart(2, '0')}`
+    const name = basename(file).replace(/\.mp4$/, '')
     // Derive the allowed filename from its ID; a forged manifest cannot delete
     // source media, editor previews, metadata or another run's files.
-    if (basename(file) !== `${name}.mp4` || realpathSync(dirname(file)) !== canonical) throw new Error('The selected clip is outside its Library run.')
+    // Names: "clip_NN" (older runs) or "dd-mm-yy hhmm word clip NN" (engine clip_names.py).
+    const id = String(clip.clip_index).padStart(2, '0')
+    if (!new RegExp(`^(?:clip_|\\d{2}-\\d{2}-\\d{2} \\d{4} [a-z]+ clip )${id}\\.mp4$`).test(basename(file))
+      || realpathSync(dirname(file)) !== canonical) throw new Error('The selected clip is outside its Library run.')
     include(file)
     // Sidecars written next to each clip: framing, captions and upload notes.
     for (const suffix of ['.framing.json', '.srt', '.youtube.txt']) include(join(run, `${name}${suffix}`))

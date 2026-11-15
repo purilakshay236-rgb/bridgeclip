@@ -7,6 +7,9 @@ TWITCH_ERRORS = {
     "twitch_not_completed": "Twitch VOD is not completed",
     "twitch_duration": "Twitch VOD duration is invalid or too long",
     "twitch_unavailable": "Twitch VOD unavailable",
+    # Source limits apply to every source type, so they share the safe-message path.
+    "source_too_large": "Video exceeds the 20 GB source limit",
+    "source_too_long": "Video exceeds the six hour limit",
 }
 
 DISK_FULL_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}

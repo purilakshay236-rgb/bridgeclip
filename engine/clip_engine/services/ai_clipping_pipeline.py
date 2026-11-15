@@ -21,11 +21,13 @@ import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Optional
 
 from clip_engine.config import CaptionStyle, LayoutStyle, get_settings, is_longform, resolve_clip_duration_bounds
 from clip_engine.services.video_speed import validate_video_speed
+from clip_engine.services.clip_names import clip_stem
 from clip_engine.error_policy import NoClipCandidatesError, NoRequestedMomentsError, safe_failure_code, safe_processing_error
 from clip_engine.services.source_context import SourceContextService, context_for_prompt, transcription_terms
 from clip_engine.services.editorial_evidence import discovery_feedback, overlaps
@@ -64,6 +66,7 @@ from clip_engine.services.visual_clip_sampling import has_visual_change, sample_
 from clip_engine.services.video_downloader import (
     DownloadResult,
     VideoDownloaderService,
+    VideoDownloadError,
 )
 from clip_engine.services.webhook_service import (
     WebhookService,
@@ -290,6 +293,11 @@ class AIClippingPipeline:
                 )
                 effective_end_time = video_duration
                 request.end_time_seconds = effective_end_time
+
+            if download_result.source_type == "local":
+                span = (effective_end_time if effective_end_time is not None else video_duration) - (request.start_time_seconds or 0)
+                if span > self.settings.max_download_duration_seconds:
+                    raise VideoDownloadError("Video exceeds the six hour limit", reason="source_too_long")
 
             capture_memory("after_download")
 
@@ -805,7 +813,8 @@ class AIClippingPipeline:
                                 trace["clip_index"] = index
                                 trace["source"].update({"duration_ms": round(video_duration * 1000),
                                                          "preview_status": preview_status})
-                                self._save_local_json(job_id, f"clip_{index:02d}.framing", trace, compact=True)
+                                stem = os.path.splitext(os.path.basename(clip_artifacts[index].s3_url))[0]
+                                self._save_local_json(job_id, f"{stem}.framing", trace, compact=True)
                             except (OSError, ValueError):
                                 logger.warning("Framing decisions could not be saved")
                 stage_timings["local_save"] = time.perf_counter() - stage_start
@@ -1179,9 +1188,11 @@ class AIClippingPipeline:
         """Copy rendered clips to the local output directory."""
         output_dir = self._get_local_output_dir(job_id)
         artifacts = []
+        saved_at = datetime.now()
 
         for i, (clip_path, segment) in enumerate(rendered_clips):
-            dest = os.path.join(output_dir, f"clip_{i:02d}.mp4")
+            stem = clip_stem(job_id, i, saved_at)
+            dest = os.path.join(output_dir, f"{stem}.mp4")
             # The work directory is removed after the job. Linking on the same
             # filesystem keeps the saved clip without duplicating its bytes at
             # the point when all rendered clips and the downloaded source are
@@ -1196,15 +1207,15 @@ class AIClippingPipeline:
                     raise
                 shutil.copy2(clip_path, dest)
             file_size = os.path.getsize(dest)
-            logger.info(f"Saved clip_{i:02d}.mp4 ({file_size / 1024 / 1024:.1f} MB): {dest}")
+            logger.info(f"Saved {stem}.mp4 ({file_size / 1024 / 1024:.1f} MB): {dest}")
 
             subtitle_url = None
             if segment.subtitle_path and os.path.isfile(segment.subtitle_path):
-                srt_dest = os.path.join(output_dir, f"clip_{i:02d}.srt")
+                srt_dest = os.path.join(output_dir, f"{stem}.srt")
                 shutil.copy2(segment.subtitle_path, srt_dest)
                 subtitle_url = f"file://{os.path.abspath(srt_dest)}"
             if segment.description or segment.output_chapters:
-                self._write_upload_notes(os.path.join(output_dir, f"clip_{i:02d}.youtube.txt"), segment)
+                self._write_upload_notes(os.path.join(output_dir, f"{stem}.youtube.txt"), segment)
 
             artifacts.append(ClipArtifact(
                 clip_index=i,

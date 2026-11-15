@@ -271,7 +271,7 @@ def test_export_appends_library_clip_and_preserves_source_and_previous_exports(m
     asyncio.run(run_editor(config))
     output = json.loads((tmp_path / 'job_output.json').read_text())
     assert output['total_clips'] == 1 and output['clips'][0]['duration_ms'] == 5600
-    assert (tmp_path / 'clip_00.mp4').read_bytes() == b'final clip'
+    assert [p.read_bytes() for p in tmp_path.glob('* clip 00.mp4')] == [b'final clip']
     saved = json.loads((tmp_path / 'editor-project.json').read_text())
     assert saved['candidates'][0]['exports'] == [0] and saved['candidates'][0]['status'] == 'baked'
     assert saved['transcript'] == project['transcript']
@@ -282,9 +282,9 @@ def test_export_appends_library_clip_and_preserves_source_and_previous_exports(m
     saved['candidates'][0]['status'] = 'ready'
     (tmp_path / 'editor-project.json').write_text(json.dumps(saved))
     asyncio.run(run_editor(config))
-    assert (tmp_path / 'clip_01.mp4').exists() and (tmp_path / 'editor-source.mp4').read_bytes() == b'original'
+    assert list(tmp_path.glob('* clip 01.mp4')) and (tmp_path / 'editor-source.mp4').read_bytes() == b'original'
     # Deleting exports must not recycle IDs referenced by posts or bank copies.
-    for path in tmp_path.glob('clip_*.mp4'):
+    for path in tmp_path.glob('* clip *.mp4'):
         path.unlink()
     output = json.loads((tmp_path / 'job_output.json').read_text())
     output.update(clips=[], total_clips=0, next_clip_index=2)
@@ -294,7 +294,7 @@ def test_export_appends_library_clip_and_preserves_source_and_previous_exports(m
     (tmp_path / 'editor-project.json').write_text(json.dumps(saved))
     config['revision'] = saved['revision']
     asyncio.run(run_editor(config))
-    assert (tmp_path / 'clip_02.mp4').exists() and not (tmp_path / 'clip_00.mp4').exists()
+    assert list(tmp_path.glob('* clip 02.mp4')) and not list(tmp_path.glob('* clip 00.mp4'))
     assert json.loads((tmp_path / 'job_output.json').read_text())['clips'][0]['clip_index'] == 2
 
 
@@ -572,7 +572,7 @@ def test_export_killed_between_library_and_project_commits_finishes_without_a_du
     asyncio.run(run_editor(config))
     assert render.await_count == 1
     output = json.loads((tmp_path / 'job_output.json').read_text())
-    assert [x['clip_index'] for x in output['clips']] == [0] and not (tmp_path / 'clip_01.mp4').exists()
+    assert [x['clip_index'] for x in output['clips']] == [0] and not list(tmp_path.glob('* clip 01.mp4'))
     saved = json.loads((tmp_path / 'editor-project.json').read_text())
     c = saved['candidates'][0]
     # A new bake replaces the render that undoing "Refine again" could restore.

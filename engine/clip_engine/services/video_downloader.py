@@ -368,7 +368,9 @@ class VideoDownloaderService:
                 max_duration_seconds or self.settings.max_download_duration_seconds,
                 self.settings.max_download_duration_seconds,
             )
-            if not 0 < result.metadata.duration_seconds <= duration_limit:
+            if source_type != "local" and result.metadata.duration_seconds > duration_limit:
+                raise VideoDownloadError("Video exceeds the six hour limit", reason="source_too_long")
+            if not 0 < result.metadata.duration_seconds:
                 raise VideoDownloadError("Video duration is invalid or exceeds the allowed limit")
             return result
         except Exception:
@@ -379,7 +381,7 @@ class VideoDownloaderService:
     @staticmethod
     def _check_source_size(size: int) -> None:
         if size > MAX_SOURCE_BYTES:
-            raise VideoDownloadError("Video exceeds the 20 GB source limit")
+            raise VideoDownloadError("Video exceeds the 20 GB source limit", reason="source_too_large")
 
     @staticmethod
     def _check_free_space(directory: str, remaining_bytes: int) -> None:
@@ -806,8 +808,7 @@ class VideoDownloaderService:
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             raise VideoDownloadError(f"Local video not found: {path}")
-        self._check_source_size(os.path.getsize(path))
-
+        # Used in place, never copied, so only downloads are size-capped. Length is checked per selected range.
         metadata = await self._get_video_metadata_ffprobe(path)
         metadata.source_type = "local"
         metadata.title = os.path.splitext(os.path.basename(path))[0]

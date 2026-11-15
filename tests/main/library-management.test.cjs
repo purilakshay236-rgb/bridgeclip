@@ -254,6 +254,22 @@ test('selected clip deletion preserves sources, unselected files, metadata, post
   } finally { f.cleanup() }
 })
 
+test('dated clip names delete with their sidecars, and only for their own clip ID', async () => {
+  const f = clipFixture()
+  try {
+    const dated = path.join(f.run, '24-10-26 2212 americans clip 02.mp4')
+    for (const suffix of ['.mp4', '.srt', '.framing.json']) fs.renameSync(f.output.clips[1].s3_url.replace('.mp4', suffix), dated.replace('.mp4', suffix))
+    const altered = structuredClone(f.output); altered.clips[1].s3_url = `file://${dated}`; altered.clips[0].s3_url = dated
+    fs.writeFileSync(path.join(f.run, 'job_output.json'), JSON.stringify(altered))
+    await assert.rejects(f.main.deleteLibraryClips(f.run, [0]), /outside/)
+    altered.clips[0].s3_url = f.output.clips[0].s3_url
+    fs.writeFileSync(path.join(f.run, 'job_output.json'), JSON.stringify(altered))
+    await f.main.deleteLibraryClips(f.run, [2])
+    for (const suffix of ['.mp4', '.srt', '.framing.json']) assert.equal(fs.existsSync(dated.replace('.mp4', suffix)), false, suffix)
+    assert.ok(fs.existsSync(f.output.clips[0].s3_url))
+  } finally { f.cleanup() }
+})
+
 test('clip deletion rejects invalid selections and unsafe media without removing any files', async () => {
   const f = clipFixture()
   try {

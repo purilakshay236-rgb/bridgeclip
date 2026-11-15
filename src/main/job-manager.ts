@@ -19,6 +19,8 @@ interface TrackedJob {
   snapshot: JobSnapshot
   config: ClipJobConfig
   outputDirectory: string
+  /** A job that must finish before this one starts (parts of one long video run in order). */
+  after?: string
 }
 
 const jobs = new Map<string, TrackedJob>()
@@ -70,7 +72,7 @@ function pruneFinished(): void {
 }
 
 /** Track a new job (its run record already exists) and start it as soon as a slot is free. */
-export function enqueueJob(jobId: string, config: ClipJobConfig, outputDirectory: string): JobSnapshot {
+export function enqueueJob(jobId: string, config: ClipJobConfig, outputDirectory: string, after?: string): JobSnapshot {
   const snapshot: JobSnapshot = {
     id: jobId,
     revision: 0,
@@ -91,7 +93,7 @@ export function enqueueJob(jobId: string, config: ClipJobConfig, outputDirectory
     startedAt: null,
     finishedAt: null
   }
-  jobs.set(jobId, { snapshot, config, outputDirectory })
+  jobs.set(jobId, { snapshot, config, outputDirectory, after })
   queue.push(jobId)
   broadcast(snapshot)
   pump()
@@ -99,8 +101,14 @@ export function enqueueJob(jobId: string, config: ClipJobConfig, outputDirectory
 }
 
 function pump(): void {
-  while (running.size < MAX_PARALLEL_JOBS && queue.length > 0) {
-    const jobId = queue.shift()!
+  while (running.size < MAX_PARALLEL_JOBS) {
+    const blocked = (id: string): boolean => {
+      const before = jobs.get(id)?.after
+      return !!before && !!jobs.get(before) && isActiveJobStatus(jobs.get(before)!.snapshot.status)
+    }
+    const next = queue.findIndex((id) => !blocked(id))
+    if (next === -1) break
+    const jobId = queue.splice(next, 1)[0]
     const job = jobs.get(jobId)
     if (!job || job.snapshot.status !== 'queued') continue
     running.add(jobId)

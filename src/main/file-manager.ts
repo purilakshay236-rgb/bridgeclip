@@ -156,7 +156,7 @@ export async function getJobOutput(outputDir: string, libraryDir = outputDir): P
   }
 }
 
-async function getVideoDurationSeconds(videoPath: string): Promise<number | null> {
+export async function getVideoDurationSeconds(videoPath: string): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync(
       resolveBinary('ffprobe'),

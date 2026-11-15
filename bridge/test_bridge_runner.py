@@ -291,6 +291,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.describe_failure("Not enough disk space to save clips")["message"],
                          "There is not enough free disk space to finish this video.")
         self.assertEqual(bridge.describe_failure("Video download failed")["message"], "The video could not be downloaded.")
+        self.assertEqual(bridge.describe_failure("Video exceeds the 20 GB source limit")["message"], "This video file is larger than the 20 GB limit.")
+        self.assertEqual(bridge.describe_failure("Video exceeds the six hour limit")["message"], "This video is longer than the six hour limit.")
         self.assertEqual(bridge.describe_failure("YouTube is blocking this request")["message"], "YouTube asked BridgeClip to confirm it isn't a bot.")
 
     def test_twitch_failures_are_actionable_and_safe_for_the_desktop(self):

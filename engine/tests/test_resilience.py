@@ -132,7 +132,7 @@ def test_one_failed_clip_does_not_fail_the_job(monkeypatch, tmp_path, debug_capt
     assert len(preview_calls) == int(debug_capture)
     if debug_capture:
         for index, source_start in [(0, 0), (1, 120_000)]:
-            saved = json.loads((tmp_path / "out" / "job1" / f"clip_{index:02d}.framing.json").read_text())
+            saved, = [json.loads(p.read_text()) for p in (tmp_path / "out" / "job1").glob(f"* job clip {index:02d}.framing.json")]
             assert saved["clip_index"] == index
             assert saved["source"] == {"duration_ms": 300_000, "preview_status": "available"}
             assert saved["window"]["requested_start_ms"] == source_start
@@ -194,7 +194,7 @@ def test_saved_local_clips_complete_when_final_bookkeeping_fails(monkeypatch, tm
     assert result.status == JobStatus.COMPLETED
     assert result.output.total_clips == 1
     assert manifest["total_clips"] == 1
-    assert (tmp_path / "out" / "job1" / "clip_00.mp4").read_bytes() == b"mp4"
+    assert [p.read_bytes() for p in (tmp_path / "out" / "job1").glob("* job clip 00.mp4")] == [b"mp4"]
 
 
 def test_local_manifest_write_is_atomic_and_preserves_previous_result(monkeypatch, tmp_path):
@@ -230,7 +230,7 @@ def test_local_clips_link_on_same_volume_and_copy_across_volumes(monkeypatch, tm
     source.write_bytes(b"rendered clip")
 
     pipeline._save_clips_locally("linked", [(str(source), segment)])
-    linked = tmp_path / "out" / "linked" / "clip_00.mp4"
+    linked, = (tmp_path / "out" / "linked").glob("* linked clip 00.mp4")
     assert os.stat(source).st_ino == os.stat(linked).st_ino
     source.unlink()
     assert linked.read_bytes() == b"rendered clip"
@@ -242,7 +242,16 @@ def test_local_clips_link_on_same_volume_and_copy_across_volumes(monkeypatch, tm
 
     monkeypatch.setattr(pipeline_module.os, "link", cross_volume)
     pipeline._save_clips_locally("copied", [(str(source), segment)])
-    copied = tmp_path / "out" / "copied" / "clip_00.mp4"
+    copied, = (tmp_path / "out" / "copied").glob("* copied clip 00.mp4")
     assert copied.read_bytes() == b"copied clip"
     assert os.stat(source).st_ino != os.stat(copied).st_ino
 
+
+
+def test_clip_names_are_dated_and_carry_a_title_word():
+    from datetime import datetime
+    from clip_engine.services.clip_names import clip_stem
+    when = datetime(2026, 10, 24, 22, 12)
+    assert clip_stem("Should Americans Today Pay for the Mistakes", 1, when) == "24-10-26 2212 americans clip 01"
+    assert clip_stem("Ben Shapiro DESTROYS 2", 0, when) == "24-10-26 2212 ben clip 00"
+    assert clip_stem("\u0928\u092e\u0938\u094d\u0924\u0947 / ..", 12, when) == "24-10-26 2212 video clip 12"

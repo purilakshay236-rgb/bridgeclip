@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from clip_engine.error_policy import NoClipCandidatesError
 
+from clip_engine.services.clip_names import clip_stem
 from clip_engine.services.clip_editor import compute_keep_intervals, reaction_intervals, window_words
 from clip_engine.services.coherence_review import CLIP_QUESTIONS, CUT_QUESTIONS, CoherenceReviewer, check_threshold, dialogue
 from clip_engine.services.jev_service import JevService
@@ -598,7 +599,7 @@ async def run_editor(config, progress=None):
         # was killed in between, this exact edit (same revision) is already in
         # the library: finish that commit instead of rendering a duplicate.
         done = next((x for x in output['clips'] if x.get('editor_candidate') == c['id'] and x.get('editor_revision') == project['revision']
-                     and x['clip_index'] not in c['exports'] and (run / f"clip_{x['clip_index']:02d}.mp4").is_file()), None)
+                     and x['clip_index'] not in c['exports'] and Path(x['s3_url'].removeprefix('file://')).is_file()), None)
         c['exports'].append(done['clip_index'] if done else await export_clip(run, project, c, output, source, transcript))
         c['status'] = 'baked'
         c.pop('baked_hash', None)
@@ -639,7 +640,7 @@ async def export_clip(run, project, c, output, source, transcript):
     if type(next_index) is not int or not 0 <= next_index <= 1000:
         raise EditorError('invalid_edit', 'Invalid export sequence')
     index = max(next_index, max((x['clip_index'] for x in output['clips']), default=-1) + 1)
-    while (run / f'clip_{index:02d}.mp4').exists() or (run / f'clip_{index:02d}.mp4').is_symlink():
+    while (run / f'clip_{index:02d}.mp4').exists() or (run / f'clip_{index:02d}.mp4').is_symlink():  # pre-rename runs
         index += 1
     if index > 999:
         raise EditorError('invalid_edit', 'Too many exports in this project')
@@ -650,7 +651,7 @@ async def export_clip(run, project, c, output, source, transcript):
     ranges = [tuple(interval) for interval in c['ranges']]
     if project.get('pacing', 'tight') == 'tight':
         ranges = tight_ranges(ranges, transcript, plan)
-    path = run / f'clip_{index:02d}.mp4'
+    path = run / f'{clip_stem(run.name, index, datetime.now())}.mp4'
     if path.exists() or path.is_symlink():
         raise ValueError('Export file already exists')
     # Commit complete renders only; failed/cancelled exports do not change the library.

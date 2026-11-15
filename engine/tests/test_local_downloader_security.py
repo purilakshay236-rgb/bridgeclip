@@ -91,6 +91,9 @@ def test_disk_full_is_reported_through_wrapped_errors():
     except VideoDownloadError as wrapped:
         assert safe_processing_error(wrapped) == disk_full
     assert safe_processing_error(VideoDownloadError("HTTP Error 403")) == "Video download failed"
+    # Source limits say which limit was hit instead of a generic download failure.
+    assert safe_processing_error(VideoDownloadError("x", reason="source_too_large")) == "Video exceeds the 20 GB source limit"
+    assert safe_processing_error(VideoDownloadError("x", reason="source_too_long")) == "Video exceeds the six hour limit"
     # Both the metadata and the media step surface YouTube's bot check without leaking the URL.
     for text in ("YouTube is temporarily blocking this request. Please try again", "Failed to download video: ERROR: [youtube] x: Sign in to confirm you're not a bot"):
         assert safe_processing_error(VideoDownloadError(text)) == "YouTube is blocking this request"
