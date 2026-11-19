@@ -151,8 +151,8 @@ def test_unusable_billed_responses_are_included_in_cost(service, monkeypatch, tm
     missing = {"text": "Hello", "usage": {"seconds": 2, "cost": .002}}
     invalid = reply(start=3, end=1, cost=.003)
     result, models = transcribe(service, monkeypatch, tmp_path, [missing, invalid, reply(cost=0)])
-    assert models == [TURBO, WHISPER, MAI]
-    assert result.model == f"{TURBO} + {WHISPER} + {MAI}"
+    assert models == [TURBO, WHISPER, WHISPER]  # an invalid answer is retried on the same model first
+    assert result.model == f"{TURBO} + {WHISPER}"
     assert result.api_costs.estimated_cost_usd == .005
     assert result.api_costs.audio_duration_seconds == 6
     assert result.api_costs.attempts == 3
@@ -289,3 +289,12 @@ def test_oversized_stream_is_bounded_and_closed(service, monkeypatch, tmp_path):
     with pytest.raises(stt.TranscriptionProviderError, match="response_too_large"):
         request(service, monkeypatch, tmp_path, body=body)
     assert body.closed and body.reads == 2
+
+
+def test_one_bad_chunk_does_not_demote_the_model_for_later_chunks(service, monkeypatch, tmp_path):
+    invalid = reply(start=3, end=1)
+    result, models = transcribe(service, monkeypatch, tmp_path, [
+        invalid, invalid, reply("First.", .1, .5), reply("Second.", 1.3, 1.8), reply("Tail.", 1.1, 1.5),
+    ], duration=601)
+    assert models == [TURBO, TURBO, WHISPER, TURBO, TURBO]
+    assert result.full_text == "First. Second. Tail."

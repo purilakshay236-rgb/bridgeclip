@@ -46,7 +46,7 @@ def test_full_transcript_and_rejected_candidates_are_saved(monkeypatch, tmp_path
         assert order == ['context']
         order.append('transcribe')
         assert kwargs['keyterms'] == brief()['vocabulary']
-        assert kwargs['start_seconds'] is None and kwargs['end_seconds'] is None
+        assert (kwargs['start_seconds'], kwargs['end_seconds']) == (0.0, 12)  # range padded for Jev, clamped to the source
         return TranscriptionResult(segments=transcript(), full_text='Complete source')
     async def plan(**kwargs):
         assert order == ['context', 'transcribe']

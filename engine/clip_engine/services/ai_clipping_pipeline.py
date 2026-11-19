@@ -75,6 +75,9 @@ from clip_engine.services.webhook_service import (
 
 logger = logging.getLogger(__name__)
 
+# Context Jev sees on each side of a selected range.
+JEV_RANGE_CONTEXT_SECONDS = 600
+
 
 class JobStatus(str, Enum):
     """Status of an AI clipping job."""
@@ -294,10 +297,16 @@ class AIClippingPipeline:
                 effective_end_time = video_duration
                 request.end_time_seconds = effective_end_time
 
-            if download_result.source_type == "local":
+            if getattr(download_result, "source_type", None) == "local":
                 span = (effective_end_time if effective_end_time is not None else video_duration) - (request.start_time_seconds or 0)
                 if span > self.settings.max_download_duration_seconds:
                     raise VideoDownloadError("Video exceeds the six hour limit", reason="source_too_long")
+
+            # Jev may extend clips past the range, so it gets context on both sides,
+            # not the whole source: that can exceed the transcription limit and cost.
+            pad = JEV_RANGE_CONTEXT_SECONDS if jev_enabled else 0
+            analysis_start = None if request.start_time_seconds is None else max(0.0, request.start_time_seconds - pad)
+            analysis_end = None if effective_end_time is None else min(video_duration, effective_end_time + pad)
 
             capture_memory("after_download")
 
@@ -336,8 +345,8 @@ class AIClippingPipeline:
                     video_path=download_result.video_path,
                     work_dir=work_dir,
                     keyterms=transcription_terms(request.keyterms, source_context) if source_context else request.keyterms,
-                    start_seconds=None if jev_enabled else request.start_time_seconds,
-                    end_seconds=None if jev_enabled else effective_end_time,
+                    start_seconds=analysis_start,
+                    end_seconds=analysis_end,
                 )
             except NoAudioTrackError:
                 logger.info("Source has no audio track; trying visual-only planning")
@@ -357,8 +366,8 @@ class AIClippingPipeline:
                 stage_start = time.perf_counter()
                 visual_frames = await sample_visual_planning_frames(
                     download_result.video_path, video_duration, work_dir,
-                    None if jev_enabled else request.start_time_seconds,
-                    None if jev_enabled else effective_end_time,
+                    analysis_start,
+                    analysis_end,
                 )
                 stage_timings["visual_sampling"] = time.perf_counter() - stage_start
                 logger.info("Visual-only planning has %s sampled frames", len(visual_frames))
@@ -970,10 +979,8 @@ class AIClippingPipeline:
             metrics = {
                 'diagnostics': self._diagnostics.snapshot(),
                 'pipeline_stages': self._stage_progress.update('completed'),
-                # Jev plans from the full source; otherwise only the range is analyzed.
-                "analysis_duration_seconds": video_duration if jev_enabled else max(
-                    0, (effective_end_time if effective_end_time is not None else video_duration)
-                    - (request.start_time_seconds or 0),
+                "analysis_duration_seconds": max(
+                    0, (analysis_end if analysis_end is not None else video_duration) - (analysis_start or 0),
                 ),
                 "requested_settings": {
                     "clipping_mode": self.settings.clipping_mode,

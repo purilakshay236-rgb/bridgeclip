@@ -635,8 +635,11 @@ class TranscriptionService:
         errors get one cancellable retry per model, then another timed-word
         model. A long Retry-After skips this model instead of retrying early.
         """
-        while models:
-            model = models[0]
+        # A bad answer for this chunk must not demote the model for the next ones,
+        # so work on a copy and only drop a model from `models` when it is unusable.
+        order = list(models)
+        while order:
+            model = order[0]
             name = TRANSCRIPTION_MODEL_NAMES.get(model, "transcription model")
             for attempt in range(TRANSCRIPTION_ATTEMPTS_PER_MODEL):
                 try:
@@ -654,6 +657,8 @@ class TranscriptionService:
                     return self._parse_openrouter_response(response, duration, model)
                 except TranscriptionError as error:
                     transient = error.reason in {"rate_limit", "network"}
+                    # Whisper occasionally returns an unusable result for one chunk; a retry usually works.
+                    chunk_specific = error.reason == "invalid_response"
                     recoverable = transient or error.reason in {
                         "bad_request", "unavailable", "missing_word_timestamps", "invalid_response",
                     }
@@ -662,16 +667,18 @@ class TranscriptionService:
                     logger.warning("Transcription attempt failed: model=%s, reason=%s, status=%s, attempt=%d",
                                    model, error.reason, getattr(error, "status_code", None), attempt + 1)
                     delay = max(2.0 + random.uniform(0, 0.5), getattr(error, "retry_after_seconds", None) or 0)
-                    if transient and attempt + 1 < TRANSCRIPTION_ATTEMPTS_PER_MODEL and delay <= MAX_TRANSCRIPTION_RETRY_WAIT:
+                    if (transient or chunk_specific) and attempt + 1 < TRANSCRIPTION_ATTEMPTS_PER_MODEL and delay <= MAX_TRANSCRIPTION_RETRY_WAIT:
                         self._progress(f"{name} is temporarily busy. Retrying in {math.ceil(delay)} seconds...")
                         await asyncio.sleep(delay)
                         continue
-                    if len(models) == 1:
+                    if len(order) == 1:
                         raise
-                    models.pop(0)
-                    next_name = TRANSCRIPTION_MODEL_NAMES.get(models[0], "another transcription model")
+                    order.pop(0)
+                    if not chunk_specific and model in models:
+                        models.remove(model)
+                    next_name = TRANSCRIPTION_MODEL_NAMES.get(order[0], "another transcription model")
                     self._progress(f"Trying {next_name} for transcription...")
-                    logger.info("Switching transcription model: %s -> %s", model, models[0])
+                    logger.info("Switching transcription model: %s -> %s", model, order[0])
                     break
         raise TranscriptionError("No transcription model available")
 

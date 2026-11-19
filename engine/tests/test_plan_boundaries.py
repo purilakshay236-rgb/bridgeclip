@@ -509,7 +509,7 @@ class TestJevOffPipeline:
         assert result.output.metrics["analysis_duration_seconds"] == pytest.approx(range_end - range_start)
         assert "source_context" not in result.output.metrics["api_costs"]
 
-    def test_jev_review_keeps_full_source_context_and_exact_intervals(self, monkeypatch, tmp_path):
+    def test_jev_review_keeps_range_context_and_exact_intervals(self, monkeypatch, tmp_path):
         from unittest.mock import AsyncMock
         from clip_engine.services.intelligence_planner import ClipPlanResponse, ClipPlanSegment
         pipeline, tr, context, transcribed, rendered = _pipeline_fixture(monkeypatch, tmp_path, jev_enabled=True)
@@ -524,7 +524,8 @@ class TestJevOffPipeline:
             start_time_seconds=100, end_time_seconds=200)))
         assert result.status == JobStatus.COMPLETED, result.error
         context.assert_awaited_once()
-        assert transcribed == [(None, None)]
+        # Jev gets context around the range, clamped to the source, never the whole source.
+        assert transcribed == [(0.0, min(200 + pipeline_module.JEV_RANGE_CONTEXT_SECONDS, tr[-1].end_time_ms / 1000 + 5))]
         assert plan.await_args.kwargs["jev_enabled"] is True
         request = rendered[0]
         assert request.apply_padding is False
